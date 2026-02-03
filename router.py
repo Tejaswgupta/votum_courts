@@ -7,7 +7,6 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 from . import hc_services
-from .aptel import get_all_cases_by_dfr, get_case_data
 from .bombay_hc import get_bombay_case_details
 from .bombay_hc import \
     persist_orders_to_storage as bombay_persist_orders_to_storage
@@ -65,14 +64,7 @@ async def search_by_advocate_name(
     )
 
 
-@router.get("/search_by_aptel_dfr/", response_model=List[SearchResultData])
-async def search_by_aptel_dfr(dfr: str, year: str):
-    return get_all_cases_by_dfr(dfr, year)
 
-
-@router.get("/search_by_aptel_cnr/", response_model=ConciseJson)
-async def search_by_aptel_cnr(case_no: str):
-    return get_case_data(case_no)
 
 
 @router.get("/search_cestat_search_by_diary/")
