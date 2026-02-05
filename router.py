@@ -10,6 +10,8 @@ from . import hc_services
 from .bombay_hc import get_bombay_case_details
 from .bombay_hc import \
     persist_orders_to_storage as bombay_persist_orders_to_storage
+from .dc_api import EcourtsWebScraper
+from .dc_api import persist_orders_to_storage as web_persist_orders_to_storage
 from .delhi_hc import get_delhi_case_details
 from .delhi_hc import \
     persist_orders_to_storage as delhi_persist_orders_to_storage
@@ -39,8 +41,6 @@ from .scrapers import (sci_get_details, sci_search_by_aor_code,
                        sci_search_by_case_number, sci_search_by_court,
                        sci_search_by_diary_number, sci_search_by_party_name)
 from .search import ConciseJson, SearchResultData
-from .web_api import EcourtsWebScraper
-from .web_api import persist_orders_to_storage as web_persist_orders_to_storage
 
 router = APIRouter(prefix="/ecourts", tags=["ecourts"])
 
