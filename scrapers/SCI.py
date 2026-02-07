@@ -5,6 +5,8 @@ import operator
 import random
 import re
 import string
+import os
+import tempfile
 from typing import Any, Dict, List, Optional
 
 import ddddocr
@@ -31,7 +33,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 TOKEN_URL = "https://www.sci.gov.in/case-status-party-name/"
-CAUSE_LIST_URL = "https://www.sci.gov.in/cause-list/"
 CAPTCHA_URL = "https://www.sci.gov.in/?_siwp_captcha&id="
 DATA_URL = "https://www.sci.gov.in/wp-admin/admin-ajax.php"
 
@@ -832,117 +833,60 @@ def sci_get_cause_list(
         raise
 
 
-def sci_get_cause_list_glance(target_date: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Fetch the 'Cause Lists at a Glance' table from the SCI website.
-    Returns a list of dictionaries, one per date/row, containing PDF links.
-    """
-    try:
-        resp = _session_get(CAUSE_LIST_URL)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        
-        table = soup.find("table", class_="causelist-glance")
-        if not table:
-            logger.warning("Could not find 'causelist-glance' table on SCI cause-list page.")
-            return []
-            
-        # The table has complex headers, but the body rows contain the links.
-        # Each row's first few cells might be merged (rowspan).
-        # We want to extract links and associate them with a date.
-        
-        results = []
-        rows = table.find("tbody").find_all("tr") if table.find("tbody") else table.find_all("tr")
-        
-        # Header keys based on the structure we saw:
-        # 0: Court Number (rowspan)
-        # 1-3: Miscellaneous (Advance, Main, Suppl)
-        # 4-5: Regular (Main, Suppl)
-        # 6-7: Chamber (Main, Suppl)
-        # 8-9: Single Judge (Main, Suppl)
-        # 10-11: Review & Curative (Main, Suppl)
-        # 12-13: Registrar (Main, Suppl)
-        # 14: Weekly
-        
-        header_map = [
-            "misc_advance", "misc_main", "misc_suppl",
-            "reg_main", "reg_suppl",
-            "chamber_main", "chamber_suppl",
-            "single_main", "single_suppl",
-            "review_main", "review_suppl",
-            "registrar_main", "registrar_suppl",
-            "weekly"
-        ]
-        
-        current_court = "ALL COURTS" # Default for the first few rows
-        
-        for row in rows:
-            cells = row.find_all("td")
-            if not cells:
-                continue
-                
-            offset = 0
-            # Check if first cell is Court Number
-            first_cell_text = cells[0].get_text(strip=True)
-            if "COURT" in first_cell_text.upper() or "ALL COURTS" in first_cell_text.upper():
-                current_court = first_cell_text
-                offset = 1
-            
-            # The next cell usually contains the date as text in a link
-            date_cell = cells[offset]
-            date_link = date_cell.find("a")
-            row_date = date_link.get_text(strip=True) if date_link else None
-            
-            if not row_date:
-                continue
-                
-            if target_date and row_date != target_date:
-                continue
-                
-            row_data = {
-                "court": current_court,
-                "date": row_date,
-                "links": {}
-            }
-            
-            # Fill links
-            # We skip the date cell too
-            for i, cell in enumerate(cells[offset:]):
-                link = cell.find("a")
-                if link and link.get("href"):
-                    # We need to map the index to the header
-                    # Note: index i=0 is the date cell itself
-                    if i < len(header_map):
-                        key = header_map[i]
-                        row_data["links"][key] = link.get("href")
-            
-            results.append(row_data)
-            
-        return results
-
-    except Exception as e:
-        logger.error(f"Failed to fetch SCI cause list glance: {e}")
-        return []
-
-
 def sci_get_all_cases_for_day(listing_date: str) -> List[Dict[str, Any]]:
     """
-    Fetch all cases listed for a specific day across all courts.
-    This iterates through all court numbers (1-17 and Registrar).
+    Fetch all cases listed for a specific day by fetching the 'All Courts' cause list PDFs
+    and parsing them.
     """
-    courts = [str(i) for i in range(1, 18)] + ["21"] # 21 is Registrar
+    logger.info(f"Fetching 'All Courts' cause list for {listing_date}...")
+    
+    # 1. Get list of PDFs
+    # search_by="all_courts" returns rows with PDF links
+    pdf_rows = sci_get_cause_list(listing_date, search_by="all_courts")
+    
+    if not pdf_rows:
+        logger.warning(f"No cause lists found for {listing_date}")
+        return []
+        
     all_cases = []
     
-    for court_id in courts:
+    for row in pdf_rows:
+        pdf_url = None
+        for key, value in row.items():
+            if key.endswith("_url") and value:
+                pdf_url = value
+                break
+        
+        if not pdf_url:
+            continue
+            
+        if not pdf_url.startswith("http"):
+             if pdf_url.startswith("/"):
+                 pdf_url = "https://www.sci.gov.in" + pdf_url
+             else:
+                 pass 
+
+        logger.info(f"Downloading PDF from {pdf_url}...")
         try:
-            logger.info(f"Fetching cause list for Court {court_id} on {listing_date}...")
-            cases = sci_get_cause_list(listing_date, search_by="court", court=court_id)
-            if cases and isinstance(cases, list):
-                for case in cases:
-                    case['court_id'] = court_id
-                    all_cases.append(case)
+            resp = _session_get(pdf_url)
+            resp.raise_for_status()
+            
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
+                tmp_pdf.write(resp.content)
+                tmp_pdf_path = tmp_pdf.name
+                
+            try:
+                # Parse PDF
+                entries = sci_parse_cause_list_pdf(tmp_pdf_path)
+                logger.info(f"Parsed {len(entries)} entries from PDF.")
+                all_cases.extend(entries)
+            finally:
+                if os.path.exists(tmp_pdf_path):
+                    os.remove(tmp_pdf_path)
+                    
         except Exception as e:
-            logger.warning(f"Error fetching cases for court {court_id}: {e}")
+            logger.error(f"Failed to process PDF {pdf_url}: {e}")
+            continue
             
     return all_cases
 
@@ -1136,6 +1080,10 @@ def sci_parse_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
     return entries
 
 
+def _pdf_normalize(text: str) -> str:
+    return re.sub(r"[\s\-]+", "", (text or "").upper())
+
+
 def sci_find_case_entries_in_pdf(pdf_path: str, case_number: str) -> List[Dict[str, Any]]:
     """
     Find cause-list entries that match a case number.
@@ -1179,13 +1127,6 @@ async def persist_orders_to_storage(
 
 
 if __name__ == "__main__":
-    # Test Cause List Glance
-    print("Fetching Cause List Glance...")
-    glance = sci_get_cause_list_glance()
-    print(f"Found {len(glance)} rows in Glance table.")
-    if glance:
-        print("First row:", glance[0])
-    
     # Test a single court fetch
     print("\nFetching cases for Court 1 on 09-02-2026...")
     cases = sci_get_cause_list("09-02-2026", search_by="court", court="1")
