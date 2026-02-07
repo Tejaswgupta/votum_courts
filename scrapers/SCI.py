@@ -31,13 +31,13 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 TOKEN_URL = "https://www.sci.gov.in/case-status-party-name/"
+CAUSE_LIST_URL = "https://www.sci.gov.in/cause-list/"
 CAPTCHA_URL = "https://www.sci.gov.in/?_siwp_captcha&id="
 DATA_URL = "https://www.sci.gov.in/wp-admin/admin-ajax.php"
 
 ocr = ddddocr.DdddOcr(show_ad=False)
 session = requests.Session()
 session.verify = False
-session.cookies["PHPSESSID"] = "a0j600oa13tj40rupucvovgetq"
 BASE_HEADERS = {
     'Accept': 'application/json, text/javascript, */*; q=0.01',
     'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
@@ -728,12 +728,23 @@ def parse_cause_list_table(soup):
     headers = [th.text.strip() for th in table.find_all("th")]
     rows = table.find_all("tr")[1:]
 
+    current_section = None
+
     for row in rows:
         cells = row.find_all("td")
         if not cells:
             continue
+        
+        # Handle header rows (often used for categories like [FRESH (FOR ADMISSION)])
+        # These usually have only one cell with colspan or just a large text
+        if len(cells) == 1:
+            current_section = cells[0].text.strip()
+            continue
 
         row_data = {}
+        if current_section:
+            row_data['section'] = current_section
+            
         for i, cell in enumerate(cells):
             header = headers[i] if i < len(headers) else f"column_{i+1}"
             text = cell.text.strip()
@@ -821,198 +832,328 @@ def sci_get_cause_list(
         raise
 
 
-
-
-def _pdf_normalize(text: str) -> str:
-    return re.sub(r"[\s\-]+", "", text.upper())
-
-
-def _is_sno_block(text: str, x0: float) -> bool:
-    if x0 > 90:
-        return False
-    line = text.strip().splitlines()[0] if text.strip() else ""
-    return bool(re.match(r"^\d{1,3}\b", line))
-
-
-def _blocks_in_range(blocks, start_y: float, end_y: float):
-    return [b for b in blocks if b[1] >= start_y and b[1] <= end_y]
-
-
-def _blocks_to_lines(blocks) -> List[str]:
-    lines: List[str] = []
-    current_y = None
-    current_line = []
-
-    for b in blocks:
-        y = b[1]
-        if current_y is None or abs(y - current_y) <= 2:
-            current_line.append(b)
-            if current_y is None:
-                current_y = y
-        else:
-            line_text = " ".join(
-                [
-                    t[4].strip().replace("\n", " ")
-                    for t in sorted(current_line, key=lambda x: x[0])
-                    if t[4].strip()
-                ]
-            ).strip()
-            if line_text:
-                lines.append(line_text)
-            current_line = [b]
-            current_y = y
-
-    if current_line:
-        line_text = " ".join(
-            [
-                t[4].strip().replace("\n", " ")
-                for t in sorted(current_line, key=lambda x: x[0])
-                if t[4].strip()
-            ]
-        ).strip()
-        if line_text:
-            lines.append(line_text)
-
-    return lines
-
-
-def _extract_lines_from_pdf_page(page: fitz.Page) -> List[Dict[str, Any]]:
-    data = page.get_text("dict")
-    lines: List[Dict[str, Any]] = []
-
-    for block in data.get("blocks", []):
-        if block.get("type") != 0:
-            continue
-        for line in block.get("lines", []):
-            spans = line.get("spans", [])
-            text = " ".join(
-                s["text"].strip() for s in spans if s.get("text", "").strip()
-            )
-            text = re.sub(r"\s+", " ", text).strip()
-            if not text:
+def sci_get_cause_list_glance(target_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Fetch the 'Cause Lists at a Glance' table from the SCI website.
+    Returns a list of dictionaries, one per date/row, containing PDF links.
+    """
+    try:
+        resp = _session_get(CAUSE_LIST_URL)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        table = soup.find("table", class_="causelist-glance")
+        if not table:
+            logger.warning("Could not find 'causelist-glance' table on SCI cause-list page.")
+            return []
+            
+        # The table has complex headers, but the body rows contain the links.
+        # Each row's first few cells might be merged (rowspan).
+        # We want to extract links and associate them with a date.
+        
+        results = []
+        rows = table.find("tbody").find_all("tr") if table.find("tbody") else table.find_all("tr")
+        
+        # Header keys based on the structure we saw:
+        # 0: Court Number (rowspan)
+        # 1-3: Miscellaneous (Advance, Main, Suppl)
+        # 4-5: Regular (Main, Suppl)
+        # 6-7: Chamber (Main, Suppl)
+        # 8-9: Single Judge (Main, Suppl)
+        # 10-11: Review & Curative (Main, Suppl)
+        # 12-13: Registrar (Main, Suppl)
+        # 14: Weekly
+        
+        header_map = [
+            "misc_advance", "misc_main", "misc_suppl",
+            "reg_main", "reg_suppl",
+            "chamber_main", "chamber_suppl",
+            "single_main", "single_suppl",
+            "review_main", "review_suppl",
+            "registrar_main", "registrar_suppl",
+            "weekly"
+        ]
+        
+        current_court = "ALL COURTS" # Default for the first few rows
+        
+        for row in rows:
+            cells = row.find_all("td")
+            if not cells:
                 continue
-            x0, y0, x1, y1 = line.get("bbox", (0, 0, 0, 0))
-            lines.append(
-                {
-                    "text": text,
-                    "bbox": [x0, y0, x1, y1],
-                    "x0": x0,
-                    "y0": y0,
-                    "x1": x1,
-                    "y1": y1,
-                }
-            )
+                
+            offset = 0
+            # Check if first cell is Court Number
+            first_cell_text = cells[0].get_text(strip=True)
+            if "COURT" in first_cell_text.upper() or "ALL COURTS" in first_cell_text.upper():
+                current_court = first_cell_text
+                offset = 1
+            
+            # The next cell usually contains the date as text in a link
+            date_cell = cells[offset]
+            date_link = date_cell.find("a")
+            row_date = date_link.get_text(strip=True) if date_link else None
+            
+            if not row_date:
+                continue
+                
+            if target_date and row_date != target_date:
+                continue
+                
+            row_data = {
+                "court": current_court,
+                "date": row_date,
+                "links": {}
+            }
+            
+            # Fill links
+            # We skip the date cell too
+            for i, cell in enumerate(cells[offset:]):
+                link = cell.find("a")
+                if link and link.get("href"):
+                    # We need to map the index to the header
+                    # Note: index i=0 is the date cell itself
+                    if i < len(header_map):
+                        key = header_map[i]
+                        row_data["links"][key] = link.get("href")
+            
+            results.append(row_data)
+            
+        return results
 
-    lines.sort(key=lambda l: (l["y0"], l["x0"]))
-    return lines
+    except Exception as e:
+        logger.error(f"Failed to fetch SCI cause list glance: {e}")
+        return []
+
+
+def sci_get_all_cases_for_day(listing_date: str) -> List[Dict[str, Any]]:
+    """
+    Fetch all cases listed for a specific day across all courts.
+    This iterates through all court numbers (1-17 and Registrar).
+    """
+    courts = [str(i) for i in range(1, 18)] + ["21"] # 21 is Registrar
+    all_cases = []
+    
+    for court_id in courts:
+        try:
+            logger.info(f"Fetching cause list for Court {court_id} on {listing_date}...")
+            cases = sci_get_cause_list(listing_date, search_by="court", court=court_id)
+            if cases and isinstance(cases, list):
+                for case in cases:
+                    case['court_id'] = court_id
+                    all_cases.append(case)
+        except Exception as e:
+            logger.warning(f"Error fetching cases for court {court_id}: {e}")
+            
+    return all_cases
+
+
+def _clean_pdf_line(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("Page ") and " of " in cleaned:
+        return ""
+    if "SUPREME COURT OF INDIA" in cleaned:
+        return ""
+    if "LIST OF MATTERS" in cleaned:
+        return ""
+    if "SNo. Case No." in cleaned:
+        return ""
+    if "Petitioner / Respondent" in cleaned:
+        return ""
+    return cleaned
+
+
+def _is_vs_line(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", (text or "").upper())
+    return normalized in {"VERSUS", "VS", "V/S", "VS.", "V.S."}
+
+
+def _parse_single_sci_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    case_lines = entry.get("case_lines") or []
+    party_lines = entry.get("party_lines") or []
+    advocate_lines = entry.get("advocate_lines") or []
+    raw_lines = entry.get("raw_lines") or []
+
+    # Extract Case Number
+    # Pattern e.g., "C.A. No. 9337/2022", "SLP(C) No. 18263/2022"
+    case_no_text = " ".join(case_lines).strip()
+    # Basic cleanup
+    case_no_text = re.sub(r"\s+", " ", case_no_text)
+    
+    petitioner: Optional[str] = None
+    respondent: Optional[str] = None
+    
+    # Split parties by "Versus"
+    party_text = "\n".join(party_lines)
+    vs_match = re.search(r"\b(Versus|VS\.?|V/S)\b", party_text, re.IGNORECASE)
+    
+    if vs_match:
+        petitioner = party_text[:vs_match.start()].strip().replace("\n", " ")
+        respondent = party_text[vs_match.end():].strip().replace("\n", " ")
+    else:
+        # Fallback: simple join
+        petitioner = party_text.replace("\n", " ")
+
+    pet_advocate = None
+    res_advocate = None
+    # Advocate column logic is tricky as it lists both. 
+    # Usually aligned with parties but hard to separate without layout.
+    # We will just join them for now.
+    advocate_text = " ".join(advocate_lines).strip()
+
+    return {
+        "item_no": entry.get("item_no"),
+        "page_no": entry.get("page_no"),
+        "case_no": case_no_text, # Raw case text
+        "petitioner": petitioner,
+        "respondent": respondent,
+        "pet_advocate": advocate_text, # Placeholder mixed
+        "res_advocate": None,
+        "text": "\n".join(raw_lines).strip(),
+    }
+
+
+def sci_parse_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+    """
+    Parse SCI cause-list PDF and extract structured entries.
+    """
+    entries: List[Dict[str, Any]] = []
+
+    with fitz.open(pdf_path) as doc:
+        open_entry: Optional[Dict[str, Any]] = None
+
+        for page_idx in range(doc.page_count):
+            page = doc[page_idx]
+            lines: List[Dict[str, Any]] = []
+
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    x0, y0, _, _ = line.get("bbox", (0.0, 0.0, 0.0, 0.0))
+                    # Skip header/footer zones if needed (approximate)
+                    if y0 < 50 or y0 > 800: 
+                        pass # Adjust as needed based on analysis
+                    
+                    line_text = "".join(span.get("text", "") for span in line.get("spans", []))
+                    cleaned = _clean_pdf_line(line_text)
+                    if not cleaned:
+                        continue
+                    lines.append({"x": float(x0), "y": float(y0), "text": cleaned})
+
+            lines.sort(key=lambda item: (item["y"], item["x"]))
+            
+            # Start finding entries based on Item No (x < 65)
+            # Item numbers are usually integers, sometimes with decimals like 1.1
+            
+            starts = [
+                line for line in lines 
+                if line["x"] < 65 and re.match(r"^\d+(\.\d+)?$", line["text"])
+            ]
+            starts.sort(key=lambda item: item["y"])
+
+            if not starts:
+                # Continuation page? Append to open entry
+                if open_entry:
+                    for line in lines:
+                        x = line["x"]
+                        txt = line["text"]
+                        open_entry["raw_lines"].append(txt)
+                        if 65 <= x < 180:
+                            open_entry["case_lines"].append(txt)
+                        elif 180 <= x < 420:
+                            open_entry["party_lines"].append(txt)
+                        elif x >= 420:
+                            open_entry["advocate_lines"].append(txt)
+                continue
+
+            first_start_y = starts[0]["y"]
+            
+            # Close previous page's open entry if content exists before first new entry
+            if open_entry:
+                for line in lines:
+                    if line["y"] >= first_start_y:
+                        continue
+                    x = line["x"]
+                    txt = line["text"]
+                    open_entry["raw_lines"].append(txt)
+                    if 65 <= x < 180:
+                        open_entry["case_lines"].append(txt)
+                    elif 180 <= x < 420:
+                        open_entry["party_lines"].append(txt)
+                    elif x >= 420:
+                        open_entry["advocate_lines"].append(txt)
+                
+                entries.append(_parse_single_sci_entry(open_entry))
+                open_entry = None
+
+            # Process entries on this page
+            for idx, start in enumerate(starts):
+                y_start = start["y"]
+                y_end = starts[idx + 1]["y"] if idx + 1 < len(starts) else float("inf")
+                
+                segment = {
+                    "item_no": start["text"],
+                    "page_no": page_idx + 1,
+                    "raw_lines": [],
+                    "case_lines": [],
+                    "party_lines": [],
+                    "advocate_lines": [],
+                }
+                
+                for line in lines:
+                    # Check if line is within vertical range of this entry
+                    # Note: y_end is start of next entry. 
+                    # We might grab footer text if not careful, but _clean_pdf_line handles some.
+                    if not (y_start <= line["y"] < y_end):
+                        continue
+                    
+                    x = line["x"]
+                    txt = line["text"]
+                    
+                    # Don't add the item number itself to raw lines or specific columns
+                    if line is start:
+                        continue
+
+                    segment["raw_lines"].append(txt)
+                    
+                    if 65 <= x < 180:
+                        segment["case_lines"].append(txt)
+                    elif 180 <= x < 420:
+                        segment["party_lines"].append(txt)
+                    elif x >= 420:
+                        segment["advocate_lines"].append(txt)
+
+                if idx + 1 < len(starts):
+                    entries.append(_parse_single_sci_entry(segment))
+                else:
+                    open_entry = segment
+
+        if open_entry:
+            entries.append(_parse_single_sci_entry(open_entry))
+
+    return entries
 
 
 def sci_find_case_entries_in_pdf(pdf_path: str, case_number: str) -> List[Dict[str, Any]]:
-    doc = fitz.open(pdf_path)
+    """
+    Find cause-list entries that match a case number.
+    Replaces old logic with robust full-PDF parsing.
+    """
+    all_entries = sci_parse_cause_list_pdf(pdf_path)
     target = _pdf_normalize(case_number)
-    entries: List[Dict[str, Any]] = []
-
-    for page_index, page in enumerate(doc):
-        lines = _extract_lines_from_pdf_page(page)
-        if not lines:
-            continue
-
-        match_indices = [
-            i for i, line in enumerate(lines) if target in _pdf_normalize(line["text"])
-        ]
-        if not match_indices:
-            continue
-
-        sno_candidates = [
-            i
-            for i, line in enumerate(lines)
-            if re.match(r"^\d{1,3}\b", line["text"])
-        ]
-        if sno_candidates:
-            sno_min_x0 = min(lines[i]["x0"] for i in sno_candidates)
-            sno_threshold = sno_min_x0 + 15
-            sno_indices = [
-                i for i in sno_candidates if lines[i]["x0"] <= sno_threshold
-            ]
-        else:
-            sno_indices = []
-
-        if sno_indices:
-            seen_starts = set()
-            for match_i in match_indices:
-                start_index = max(
-                    [i for i in sno_indices if i <= match_i], default=match_i
-                )
-                if start_index in seen_starts:
-                    continue
-                seen_starts.add(start_index)
-
-                end_index = min(
-                    [i for i in sno_indices if i > start_index],
-                    default=len(lines),
-                )
-                row_lines = lines[start_index:end_index]
-
-                if row_lines:
-                    x0 = min(l["x0"] for l in row_lines)
-                    y0 = min(l["y0"] for l in row_lines)
-                    x1 = max(l["x1"] for l in row_lines)
-                    y1 = max(l["y1"] for l in row_lines)
-                else:
-                    match_line = lines[match_i]
-                    x0, y0, x1, y1 = match_line["bbox"]
-
-                entries.append(
-                    {
-                        "page": page_index + 1,
-                        "text": "\n".join(l["text"] for l in row_lines).strip(),
-                        "bbox": [x0, y0, x1, y1],
-                    }
-                )
-            continue
-
-        blocks = page.get_text("blocks")
-        if not blocks:
-            continue
-
-        matching_blocks = [b for b in blocks if target in _pdf_normalize(b[4])]
-        if not matching_blocks:
-            continue
-
-        blocks_sorted = sorted(blocks, key=lambda b: (b[1], b[0]))
-
-        for match in matching_blocks:
-            match_y0 = match[1]
-            end_y = page.rect.height
-
-            for b in blocks_sorted:
-                if b[1] <= match_y0 + 2:
-                    continue
-                if _is_sno_block(b[4], b[0]):
-                    end_y = b[1] - 1
-                    break
-
-            start_y = max(0, match_y0 - 2)
-            in_range = _blocks_in_range(blocks_sorted, start_y, end_y)
-            lines = _blocks_to_lines(in_range)
-
-            if in_range:
-                x0 = min(b[0] for b in in_range)
-                y0 = min(b[1] for b in in_range)
-                x1 = max(b[2] for b in in_range)
-                y1 = max(b[3] for b in in_range)
-            else:
-                x0, y0, x1, y1 = match[0], match[1], match[2], match[3]
-
-            entries.append(
-                {
-                    "page": page_index + 1,
-                    "text": "\n".join(lines).strip(),
-                    "bbox": [x0, y0, x1, y1],
-                }
-            )
-
-    return entries
+    
+    matches = []
+    for entry in all_entries:
+        # Check in case_no field
+        if target in _pdf_normalize(entry.get("case_no", "")):
+            matches.append(entry)
+        # Fallback: check in full text
+        elif target in _pdf_normalize(entry.get("text", "")):
+            matches.append(entry)
+            
+    return matches
 
 
 def _fetch_order_document(url: str, referer: Optional[str] = None) -> requests.Response:
@@ -1038,73 +1179,16 @@ async def persist_orders_to_storage(
 
 
 if __name__ == "__main__":
-    # Test and Verify PDF Download
-    logging.basicConfig(level=logging.INFO)
+    # Test Cause List Glance
+    print("Fetching Cause List Glance...")
+    glance = sci_get_cause_list_glance()
+    print(f"Found {len(glance)} rows in Glance table.")
+    if glance:
+        print("First row:", glance[0])
     
-    # 1. Search for a case that is likely to have orders
-    # using Case Type 4 (Civil Appeal), Number 963, Year 2017
-    print("Searching for case...")
-    cases = sci_search_by_case_number('4', '963', '2017')
-    
-    if not cases:
-        print("No cases found.")
-        exit(1)
-        
-    case = cases[0]
-    print(f"Found case: {case}")
-    
-    diary_raw = case.get('cino') # e.g. "12345 / 2017"
-    if not diary_raw:
-        print("No Diary Number found in case.")
-        exit(1)
-        
-    print(f"Diary Raw: {diary_raw}")
-    try:
-        diary_no, diary_year = diary_raw.split('/')
-        diary_no = diary_no.strip()
-        diary_year = diary_year.strip()
-    except ValueError:
-        print(f"Could not parse diary number: {diary_raw}")
-        exit(1)
-        
-    # 2. Get Case Details to find Orders
-    print(f"Fetching details for Diary No: {diary_no}, Year: {diary_year}")
-    details = sci_get_details(diary_no, diary_year)
-    
-    if not details:
-        print("Failed to fetch case details.")
-        exit(1)
-        
-    orders = details.get('orders', [])
-    print(f"Found {len(orders)} orders.")
-    
-    if not orders:
-        print("No orders found for this case. Cannot verify PDF download.")
-        exit(0)
-        
-    # 3. Try to download the first order
-    first_order = orders[0]
-    doc_url = first_order.get('document_url')
-    print(f"Attempting to download order from: {doc_url}")
-    
-    try:
-        # Use the helper function we added
-        resp = _fetch_order_document(doc_url, referer="https://www.sci.gov.in/")
-        
-        if resp.status_code == 200:
-            content_type = resp.headers.get('Content-Type', '')
-            print(f"Download Status: {resp.status_code}")
-            print(f"Content-Type: {content_type}")
-            print(f"Content Length: {len(resp.content)} bytes")
-            
-            # Check for PDF signature
-            if resp.content.startswith(b'%PDF-'):
-                print("SUCCESS: Content verified as PDF.")
-            else:
-                print("WARNING: Content does not start with %PDF- signature.")
-                print(f"First 100 bytes: {resp.content[:100]}")
-        else:
-            print(f"Failed to download. Status Code: {resp.status_code}")
-            
-    except Exception as e:
-        print(f"Error during download: {e}")
+    # Test a single court fetch
+    print("\nFetching cases for Court 1 on 09-02-2026...")
+    cases = sci_get_cause_list("09-02-2026", search_by="court", court="1")
+    print(f"Found {len(cases)} cases in Court 1.")
+    if cases:
+        print("First case snippet:", str(cases[0])[:200])

@@ -1,10 +1,10 @@
+import hashlib
 import json
 import logging
+import os
 import re
 import time
-import hashlib
 import uuid
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
@@ -12,17 +12,16 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import ddddocr
+import fitz
 import httpx
 import requests
-from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
-                      wait_exponential)
-from fastapi import APIRouter, Form, HTTPException
-
 from cron_jobs.task_email import send_smtp_email
 from cron_jobs.task_notifications import send_fcm_notification
 from cron_jobs.task_sms import send_sms_message
-from cron_jobs.utils.extract_case import find_case_entries, save_screenshots
+from fastapi import APIRouter, Form, HTTPException
 from supabase_client import get_supabase_client
+from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
+                      wait_exponential)
 
 try:
     from .order_storage import \
@@ -66,6 +65,263 @@ CAUSE_LIST_HEADERS = {
 
 CAUSE_LIST_HOME_URL = "https://gujarathc-casestatus.nic.in/gujarathc/"
 CAUSE_LIST_PRINT_URL = "https://gujarathc-casestatus.nic.in/gujarathc/printBoardNew"
+
+CASE_NO_PATTERN = re.compile(r"\b(?:[A-Z]{1,4}/)?[A-Z]{1,10}/\d{1,7}/\d{4}\b")
+
+
+def _normalize_case_token(case_no: str) -> str:
+    return re.sub(r"\s+", "", (case_no or "").upper())
+
+
+def _case_tail(case_no: str) -> str:
+    token = _normalize_case_token(case_no)
+    parts = token.split("/")
+    if len(parts) >= 3:
+        return "/".join(parts[-3:])
+    return token
+
+
+def _is_vs_line(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", (text or "").upper())
+    return normalized in {"V/S", "VS", "V.S", "V/S."}
+
+
+def _clean_pdf_line(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("Page ") and " of " in cleaned:
+        return ""
+    if cleaned in {"IT CELL", "GOTO TOP", "FIRST PAGE"}:
+        return ""
+    if cleaned.startswith("Created on "):
+        return ""
+    return cleaned
+
+
+def _is_party_noise_line(text: str) -> bool:
+    upper = (text or "").upper()
+    if not upper:
+        return True
+    if upper in {
+        "SNO",
+        "CASE DETAILS",
+        "NAME OF PARTIES",
+        "NAME OF ADVOCATES",
+        "REMARKS",
+        "FRESH MATTERS",
+    }:
+        return True
+    noise_markers = [
+        "GOVERNMENT PLEADER",
+        "ADVOCATE",
+        "LAW ASSOCIATES",
+        "SINGHI & CO",
+        "LIST DATE:",
+        "CORAM:",
+        "COURT:",
+        "PAGE ",
+    ]
+    if any(marker in upper for marker in noise_markers):
+        return True
+    if re.match(r"^(MR|MRS|MS|SMT|SHRI)\b", upper):
+        return True
+    return False
+
+
+def _parse_single_cause_list_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    case_lines = entry.get("case_lines") or []
+    party_lines = entry.get("party_lines") or []
+    raw_lines = entry.get("raw_lines") or []
+
+    case_numbers: List[str] = []
+    seen = set()
+    for line in case_lines:
+        for token in CASE_NO_PATTERN.findall(line):
+            normalized = _normalize_case_token(token)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                case_numbers.append(normalized)
+
+    petitioner: Optional[str] = None
+    respondent: Optional[str] = None
+    vs_indexes = [idx for idx, line in enumerate(party_lines) if _is_vs_line(line)]
+    if vs_indexes:
+        first_vs = vs_indexes[0]
+        next_vs = vs_indexes[1] if len(vs_indexes) > 1 else len(party_lines)
+        petitioner_lines = [
+            line
+            for line in party_lines[:first_vs]
+            if line and not _is_vs_line(line) and not _is_party_noise_line(line)
+        ]
+        respondent_lines: List[str] = []
+        petitioner_norm_set = {
+            re.sub(r"[^A-Z0-9]+", "", line.upper()) for line in petitioner_lines if line
+        }
+        for line in party_lines[first_vs + 1:next_vs]:
+            if not line or _is_vs_line(line) or _is_party_noise_line(line):
+                continue
+            norm_line = re.sub(r"[^A-Z0-9]+", "", line.upper())
+            if norm_line and norm_line in petitioner_norm_set:
+                break
+            respondent_lines.append(line)
+        petitioner = " ".join(petitioner_lines).strip() or None
+        respondent = " ".join(respondent_lines).strip() or None
+
+    case_no = case_numbers[0] if case_numbers else None
+    party_names = None
+    if petitioner and respondent:
+        party_names = f"{petitioner} V/S {respondent}"
+    elif petitioner:
+        party_names = petitioner
+    elif respondent:
+        party_names = respondent
+
+    text = "\n".join(raw_lines).strip()
+    entry_hash_src = f"{entry.get('item_no')}|{entry.get('page_no')}|{text}"
+    entry_hash = hashlib.sha256(entry_hash_src.encode("utf-8")).hexdigest()
+
+    return {
+        "item_no": entry.get("item_no"),
+        "page_no": entry.get("page_no"),
+        "case_no": case_no,
+        "case_nos": case_numbers,
+        "petitioner": petitioner,
+        "respondent": respondent,
+        "party_names": party_names,
+        "text": text,
+        "entry_hash": entry_hash,
+    }
+
+
+def parse_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+    """
+    Parse Gujarat HC cause-list PDF and extract structured entries.
+
+    Returns list of entries with:
+    - item_no
+    - case_no (first detected case number in CASE DETAILS column)
+    - case_nos (all detected case numbers in CASE DETAILS column)
+    - petitioner / respondent / party_names
+    - page_no
+    - text (raw merged entry text)
+    - entry_hash
+    """
+    entries: List[Dict[str, Any]] = []
+
+    with fitz.open(pdf_path) as doc:
+        open_entry: Optional[Dict[str, Any]] = None
+
+        for page_idx in range(doc.page_count):
+            page = doc[page_idx]
+            lines: List[Dict[str, Any]] = []
+
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    x0, y0, _, _ = line.get("bbox", (0.0, 0.0, 0.0, 0.0))
+                    if y0 < 140 or y0 > 770:
+                        continue
+                    line_text = "".join(span.get("text", "") for span in line.get("spans", []))
+                    cleaned = _clean_pdf_line(line_text)
+                    if not cleaned:
+                        continue
+                    lines.append({"x": float(x0), "y": float(y0), "text": cleaned})
+
+            lines.sort(key=lambda item: (item["y"], item["x"]))
+            page_tokens = {line["text"].upper() for line in lines}
+            has_table_header = (
+                "SNO" in page_tokens
+                and "CASE DETAILS" in page_tokens
+                and "NAME OF PARTIES" in page_tokens
+            )
+
+            if not has_table_header and not open_entry:
+                continue
+
+            starts = [
+                line for line in lines if line["x"] < 70 and re.fullmatch(r"\d{1,4}", line["text"])
+            ]
+            starts.sort(key=lambda item: item["y"])
+
+            if not starts:
+                if open_entry:
+                    for line in lines:
+                        x = line["x"]
+                        txt = line["text"]
+                        open_entry["raw_lines"].append(txt)
+                        if 70 <= x < 200:
+                            open_entry["case_lines"].append(txt)
+                        elif 200 <= x < 345:
+                            open_entry["party_lines"].append(txt)
+                continue
+
+            first_start_y = starts[0]["y"]
+            if open_entry:
+                for line in lines:
+                    if line["y"] >= first_start_y:
+                        continue
+                    x = line["x"]
+                    txt = line["text"]
+                    open_entry["raw_lines"].append(txt)
+                    if 70 <= x < 200:
+                        open_entry["case_lines"].append(txt)
+                    elif 200 <= x < 345:
+                        open_entry["party_lines"].append(txt)
+                entries.append(_parse_single_cause_list_entry(open_entry))
+                open_entry = None
+
+            for idx, start in enumerate(starts):
+                y_start = start["y"]
+                y_end = starts[idx + 1]["y"] if idx + 1 < len(starts) else float("inf")
+                segment = {
+                    "item_no": start["text"],
+                    "page_no": page_idx + 1,
+                    "raw_lines": [],
+                    "case_lines": [],
+                    "party_lines": [],
+                }
+                for line in lines:
+                    if not (y_start <= line["y"] < y_end):
+                        continue
+                    x = line["x"]
+                    txt = line["text"]
+                    segment["raw_lines"].append(txt)
+                    if 70 <= x < 200:
+                        segment["case_lines"].append(txt)
+                    elif 200 <= x < 345:
+                        segment["party_lines"].append(txt)
+
+                if idx + 1 < len(starts):
+                    entries.append(_parse_single_cause_list_entry(segment))
+                else:
+                    open_entry = segment
+
+        if open_entry:
+            entries.append(_parse_single_cause_list_entry(open_entry))
+
+    return [entry for entry in entries if entry.get("case_nos")]
+
+
+def find_case_entries(pdf_path: str, registration_no: str) -> List[Dict[str, Any]]:
+    """
+    Find cause-list entries that match a registration/case number.
+    Supports matching both prefixed and non-prefixed forms:
+    e.g. R/SCA/4937/2022 <-> SCA/4937/2022.
+    """
+    target_tail = _case_tail(registration_no)
+    parsed = parse_cause_list_pdf(pdf_path)
+    if not target_tail:
+        return parsed
+
+    matched_entries: List[Dict[str, Any]] = []
+    for entry in parsed:
+        case_nos = entry.get("case_nos") or []
+        tails = {_case_tail(case_no) for case_no in case_nos if case_no}
+        if target_tail in tails:
+            matched_entries.append(entry)
+    return matched_entries
 
 def parse_listing_date(date_str: Optional[str]) -> datetime:
     if not date_str:
@@ -469,170 +725,6 @@ def _finish_cron_job_run(
         logger.warning("Failed to update cron job run %s: %s", run_id, exc)
 
 
-def _build_case_label(case_record: Dict[str, Any]) -> str:
-    case_no = case_record.get("case_no")
-    cin_no = case_record.get("cin_no")
-    registration_no = case_record.get("registration_no")
-    parts = [p for p in [case_no, cin_no, registration_no] if p]
-    return " | ".join(parts) if parts else f"Case {case_record.get('id')}"
-
-
-def _truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return f"{text[: max(0, limit - 3)]}..."
-
-
-def _get_or_create_case_notification(
-    supabase,
-    workspace_id: str,
-    target_user_id: str,
-    event_key: str,
-    title: str,
-    message: str,
-    redirect_uri: str,
-    metadata: Dict[str, Any],
-) -> bool:
-    existing = (
-        supabase.table(VOTUM_NOTIFICATIONS_TABLE)
-        .select("id")
-        .eq("workspace_id", workspace_id)
-        .eq("target_user_id", target_user_id)
-        .eq("type", "case")
-        .eq("subtype", "cause_list_entry")
-        .contains("metadata", {"case_id": metadata.get("case_id"), "event_key": event_key})
-        .limit(1)
-        .execute()
-    )
-    if existing.data:
-        return False
-
-    insert_payload = {
-        "type": "case",
-        "subtype": "cause_list_entry",
-        "module": "case",
-        "redirect_uri": redirect_uri,
-        "title": title,
-        "message": message,
-        "workspace_id": workspace_id,
-        "target_user_id": target_user_id,
-        "created_by_id": None,
-        "related_entity_type": "case",
-        "is_obsolete": False,
-        "metadata": metadata | {"event_key": event_key},
-    }
-    supabase.table(VOTUM_NOTIFICATIONS_TABLE).insert(insert_payload).execute()
-    return True
-
-
-async def _notify_cause_list_entry(
-    supabase,
-    case_record: Dict[str, Any],
-    entry: Dict[str, Any],
-    listing_date: str,
-) -> None:
-    workspace_id = case_record.get("workspace_id")
-    case_id = case_record.get("id")
-    if not workspace_id or case_id is None:
-        return
-
-    case_label = _build_case_label(case_record)
-    entry_text = (entry.get("text") or "").strip()
-    subject = f"New cause list entry: {case_label}"
-    body = f"{case_label} has a new cause list entry for {listing_date}."
-    if entry_text:
-        body = f"{body} {entry_text}"
-    body = _truncate(body, 320)
-    sms_body = _truncate(body, 150)
-    redirect_uri = f"/home/cases/{case_id}"
-    event_key = entry.get("entry_hash") or str(entry.get("id") or "")
-    metadata = {
-        "case_id": str(case_id),
-        "cin_no": case_record.get("cin_no"),
-        "listing_date": listing_date,
-        "entry_hash": entry.get("entry_hash"),
-    }
-
-    reminder_contacts = case_record.get("reminder_contacts") or []
-    for contact in reminder_contacts:
-        if not isinstance(contact, dict):
-            continue
-        contact_type = contact.get("type")
-        contact_value = contact.get("value")
-        if not contact_type or not contact_value:
-            continue
-        if contact_type == "email":
-            success = send_smtp_email(contact_value, subject, body, f"<p>{body}</p>")
-            if not success:
-                logger.warning("Failed to send reminder email to %s", contact_value)
-        elif contact_type == "phone":
-            sms_result = send_sms_message(contact_value, sms_body)
-            if not sms_result.get("success"):
-                logger.warning(
-                    "Failed to send reminder SMS to %s: %s",
-                    contact_value,
-                    sms_result.get("error"),
-                )
-
-    assigned_user_ids = case_record.get("assigned_user_ids") or []
-    assigned_user_emails: Dict[str, str] = {}
-    assigned_user_phones: Dict[str, str] = {}
-    if assigned_user_ids:
-        try:
-            user_rows = (
-                supabase.table("votum_users")
-                .select("id, email, phone_number")
-                .in_("id", assigned_user_ids)
-                .execute()
-            )
-            assigned_user_emails = {
-                row.get("id"): row.get("email")
-                for row in (user_rows.data or [])
-                if row.get("id") and row.get("email")
-            }
-            assigned_user_phones = {
-                row.get("id"): row.get("phone_number")
-                for row in (user_rows.data or [])
-                if row.get("id") and row.get("phone_number")
-            }
-        except Exception as exc:
-            logger.warning("Failed to load assigned user emails: %s", exc)
-
-    for user_id in assigned_user_ids:
-        if not user_id:
-            continue
-        user_email = assigned_user_emails.get(user_id)
-        if user_email:
-            success = send_smtp_email(user_email, subject, body, f"<p>{body}</p>")
-            if not success:
-                logger.warning("Failed to send assigned user email to %s", user_email)
-        user_phone = assigned_user_phones.get(user_id)
-        if user_phone:
-            sms_result = send_sms_message(user_phone, sms_body)
-            if not sms_result.get("success"):
-                logger.warning(
-                    "Failed to send assigned user SMS to %s: %s",
-                    user_phone,
-                    sms_result.get("error"),
-                )
-
-        created = _get_or_create_case_notification(
-            supabase,
-            workspace_id,
-            user_id,
-            event_key,
-            subject,
-            body,
-            redirect_uri,
-            metadata,
-        )
-        if not created:
-            continue
-        try:
-            await send_fcm_notification(user_id, subject, body, supabase)
-        except Exception as exc:
-            logger.warning("Failed to send push notification to %s: %s", user_id, exc)
-
 
 @router.post("/cause_list/sync")
 async def sync_cause_list(
@@ -642,7 +734,8 @@ async def sync_cause_list(
 ):
     """
     Fetch the next day's cause list, extract matching case rows by registration number,
-    and store extracted text + image path in votum_cases.cause_list_entries.
+    store extracted text + image path in 'cause_list_entries' table,
+    and generate compiled PDFs per workspace.
     """
     supabase = get_supabase_client()
     run_id = _create_cron_job_run(
@@ -663,6 +756,7 @@ async def sync_cause_list(
             raise HTTPException(status_code=400, detail=str(e))
 
         listing_date_token = target_date.strftime("%Y%m%d")
+        listing_date_db = target_date.strftime("%Y-%m-%d")
 
         try:
             pdf_bytes = fetch_cause_list_pdf_bytes(target_date)
@@ -682,8 +776,8 @@ async def sync_cause_list(
         case_query = (
             supabase.table("votum_cases")
             .select(
-                "id, workspace_id, registration_no, cause_list_entries, case_no, cin_no, "
-                "assigned_user_ids, reminder_contacts"
+                "id, workspace_id, registration_no, case_no, cin_no, "
+                "assigned_user_ids, reminder_contacts, court_name"
             )
             .execute()
         )
@@ -697,8 +791,12 @@ async def sync_cause_list(
             "entries_added": 0,
             "images_uploaded": 0,
             "entries_updated": 0,
+            "pdfs_generated": 0,
         }
         case_results = []
+        
+        # Accumulate entries for PDF generation: workspace_id -> list of entries
+        workspace_entries: Dict[str, List[Dict[str, Any]]] = {}
 
         with TemporaryDirectory() as tmp_dir:
             for case in cases:
@@ -706,169 +804,10 @@ async def sync_cause_list(
                 if not registration_no:
                     continue
 
-                entries = find_case_entries(pdf_path, registration_no)
-                if not entries:
-                    continue
+                # entries = find_case_entries(pdf_path, registration_no)
+                # if not entries:
+                #     continue
 
-                case_id = case["id"]
-                workspace_id = case.get("workspace_id")
-                if not workspace_id:
-                    continue
-                existing_entries: List[Dict[str, Any]] = (
-                    case.get("cause_list_entries") or []
-                )
-                existing_hash_index = {
-                    entry.get("entry_hash"): idx
-                    for idx, entry in enumerate(existing_entries)
-                    if entry.get("entry_hash")
-                }
-                existing_image_paths = {
-                    entry.get("image_path")
-                    for entry in existing_entries
-                    if entry.get("image_path")
-                }
-
-                case_out_dir = os.path.join(tmp_dir, f"case_{case_id}")
-                image_paths = save_screenshots(
-                    pdf_path, entries, case_out_dir, padding=10, dpi=200
-                )
-
-                new_entries: List[Dict[str, Any]] = []
-                entries_updated = 0
-                images_uploaded = 0
-
-                for idx, entry in enumerate(entries, start=1):
-                    entry_text = (entry.get("text") or "").strip()
-                    entry_hash = hashlib.sha256(
-                        f"{listing_date_token}:{entry.get('page')}:{entry.get('bbox')}:{entry_text}".encode(
-                            "utf-8"
-                        )
-                    ).hexdigest()[:12]
-
-                    image_file_name = (
-                        f"cause_list_{listing_date_token}_p{entry.get('page')}_{entry_hash}.png"
-                    )
-                    image_file_path = (
-                        f"{workspace_id}/case-{case_id}/cause-list/{image_file_name}"
-                    )
-                    image_uploaded = False
-
-                    image_index = idx - 1
-                    if (
-                        image_index < len(image_paths)
-                        and os.path.exists(image_paths[image_index])
-                        and image_file_path not in existing_image_paths
-                    ):
-                        with open(image_paths[image_index], "rb") as img_file:
-                            img_bytes = img_file.read()
-                        if not dry_run:
-                            supabase.storage.from_(storage_bucket).upload(
-                                path=image_file_path,
-                                file=img_bytes,
-                                file_options={"content-type": "image/png", "upsert": True},
-                            )
-                            public_url = supabase.storage.from_(
-                                storage_bucket
-                            ).get_public_url(image_file_path)
-                            supabase.table("documents").insert(
-                                {
-                                    "workspace_id": workspace_id,
-                                    "user_id": None,
-                                    "pdf_url": public_url,
-                                    "filename": image_file_name,
-                                    "tags": [],
-                                    "annotations": [],
-                                    "folder_id": None,
-                                    "document_type": "cause_list",
-                                    "status": "uploaded",
-                                    "metadata": {
-                                        "source": "cause_list",
-                                        "uploaded_by_name": "System",
-                                        "file_size": len(img_bytes),
-                                        "file_type": "image/png",
-                                        "storage_path": image_file_path,
-                                        "storage_bucket": storage_bucket,
-                                    },
-                                    "case_id": case_id,
-                                }
-                            ).execute()
-                        image_uploaded = True
-                        images_uploaded += 1
-
-                    entry_payload: Dict[str, Any] = {
-                        "id": str(uuid.uuid4()),
-                        "entry_hash": entry_hash,
-                        "listing_date": target_date.strftime("%Y-%m-%d"),
-                        "page": entry.get("page"),
-                        "bbox": entry.get("bbox"),
-                        "text": entry_text,
-                        "image_path": image_file_path
-                        if image_uploaded or image_file_path in existing_image_paths
-                        else None,
-                        "created_at": datetime.now().isoformat(),
-                    }
-
-                    if entry_hash in existing_hash_index:
-                        existing_entry = existing_entries[
-                            existing_hash_index[entry_hash]
-                        ]
-                        updated = False
-                        if entry_text and not existing_entry.get("text"):
-                            existing_entry["text"] = entry_text
-                            updated = True
-                        if (
-                            entry_payload["image_path"]
-                            and not existing_entry.get("image_path")
-                        ):
-                            existing_entry["image_path"] = entry_payload["image_path"]
-                            updated = True
-                        if updated:
-                            entries_updated += 1
-                        continue
-
-                    new_entries.append(entry_payload)
-
-                if (new_entries or entries_updated) and not dry_run:
-                    updated_entries = existing_entries + new_entries
-                    supabase.table("votum_cases").update(
-                        {"cause_list_entries": updated_entries}
-                    ).eq("id", case_id).execute()
-
-                    for entry_payload in new_entries:
-                        await _notify_cause_list_entry(
-                            supabase,
-                            case,
-                            entry_payload,
-                            target_date.strftime("%Y-%m-%d"),
-                        )
-
-                totals["matched_cases"] += 1
-                totals["entries_added"] += len(new_entries)
-                totals["entries_updated"] += entries_updated
-                totals["images_uploaded"] += images_uploaded
-                case_results.append(
-                    {
-                        "case_id": case_id,
-                        "registration_no": registration_no,
-                        "entries_found": len(entries),
-                        "entries_added": len(new_entries),
-                        "entries_updated": entries_updated,
-                    }
-                )
-
-        run_status = "success"
-        run_summary = {
-            "listing_date": target_date.strftime("%Y-%m-%d"),
-            "dry_run": dry_run,
-            "totals": totals,
-        }
-        return {
-            "status": "success",
-            "listing_date": target_date.strftime("%Y-%m-%d"),
-            "dry_run": dry_run,
-            "totals": totals,
-            "cases": case_results,
-        }
     except Exception as exc:
         if run_error is None:
             run_error = str(exc)
@@ -887,4 +826,7 @@ async def sync_cause_list(
 if __name__ == "__main__":
     # Test
     logging.basicConfig(level=logging.INFO)
-    print(json.dumps(get_gujarat_case_details("21", "7966", "2025")))
+    print(json.dumps(get_gujarat_case_details("21", "4937", "2022")))
+    # Print cause list entries for a case
+    res = find_case_entries("/Users/tejaswgupta/Downloads/votum/backend/ecourts/Complete_Causelist_9th_February_2026.pdf", "SCA/4937/2022")
+    print(res[0].get("text") if res else "No entries found")
