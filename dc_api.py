@@ -1,10 +1,15 @@
+import html
 import json
 import logging
+import os
 import re
 import time
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
 
 import ddddocr
+import fitz
 import requests
 import urllib3
 from bs4 import BeautifulSoup
@@ -21,6 +26,141 @@ logger = logging.getLogger(__name__)
 
 # Initialize OCR once at module level
 _ocr = ddddocr.DdddOcr(show_ad=False)
+
+DC_CASE_NO_PATTERN = re.compile(
+    r"\b(?:[A-Z0-9.()-]{1,20}/)?[A-Z0-9.()-]{1,20}/\d{1,8}/\d{2,4}\b"
+)
+
+
+def _normalize_case_token(case_no: str) -> str:
+    return re.sub(r"\s+", "", (case_no or "").upper())
+
+
+def _case_tail(case_no: str) -> str:
+    token = _normalize_case_token(case_no)
+    parts = token.split("/")
+    if len(parts) >= 3:
+        return "/".join(parts[-3:])
+    return token
+
+
+def _clean_pdf_line(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("Page ") and " of " in cleaned:
+        return ""
+    if cleaned.startswith("Created on "):
+        return ""
+    return cleaned
+
+
+def parse_dc_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+    """
+    Parse District Court cause-list PDF and extract entries carrying case numbers.
+
+    Returns list with keys:
+    - item_no
+    - page_no
+    - case_no (first detected)
+    - case_nos (all detected in the entry)
+    - text (raw merged text for the entry)
+    """
+    entries: List[Dict[str, Any]] = []
+
+    with fitz.open(pdf_path) as doc:
+        for page_idx in range(doc.page_count):
+            page = doc[page_idx]
+            lines: List[Dict[str, Any]] = []
+
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    x0, y0, _, _ = line.get("bbox", (0.0, 0.0, 0.0, 0.0))
+                    line_text = "".join(span.get("text", "") for span in line.get("spans", []))
+                    cleaned = _clean_pdf_line(line_text)
+                    if not cleaned:
+                        continue
+                    lines.append({"x": float(x0), "y": float(y0), "text": cleaned})
+
+            lines.sort(key=lambda item: (item["y"], item["x"]))
+            if not lines:
+                continue
+
+            open_entry: Optional[Dict[str, Any]] = None
+            for line in lines:
+                txt = line["text"]
+                start_match = re.match(r"^(\d{1,4})\s*[.)-]?\s+", txt)
+
+                if start_match:
+                    if open_entry:
+                        entries.append(open_entry)
+                    open_entry = {
+                        "item_no": start_match.group(1),
+                        "page_no": page_idx + 1,
+                        "lines": [txt],
+                    }
+                elif open_entry:
+                    open_entry["lines"].append(txt)
+                else:
+                    open_entry = {
+                        "item_no": None,
+                        "page_no": page_idx + 1,
+                        "lines": [txt],
+                    }
+
+            if open_entry:
+                entries.append(open_entry)
+
+    parsed_entries: List[Dict[str, Any]] = []
+    for entry in entries:
+        raw_lines = entry.get("lines") or []
+        text = "\n".join(raw_lines).strip()
+
+        case_nos: List[str] = []
+        seen = set()
+        for line in raw_lines:
+            normalized_line = re.sub(r"\s+", "", line.upper())
+            for token in DC_CASE_NO_PATTERN.findall(normalized_line):
+                normalized = _normalize_case_token(token)
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    case_nos.append(normalized)
+
+        if not case_nos:
+            continue
+
+        parsed_entries.append(
+            {
+                "item_no": entry.get("item_no"),
+                "page_no": entry.get("page_no"),
+                "case_no": case_nos[0],
+                "case_nos": case_nos,
+                "text": text,
+            }
+        )
+
+    return parsed_entries
+
+
+def find_dc_case_entries(pdf_path: str, registration_no: str) -> List[Dict[str, Any]]:
+    """
+    Filter parsed District Court cause-list entries by registration/case number tail.
+    E.g. R/SCA/4937/2022 <-> SCA/4937/2022.
+    """
+    target_tail = _case_tail(registration_no)
+    parsed = parse_dc_cause_list_pdf(pdf_path)
+    if not target_tail:
+        return parsed
+
+    matched_entries: List[Dict[str, Any]] = []
+    for entry in parsed:
+        case_nos = entry.get("case_nos") or []
+        entry_tails = {_case_tail(case_no) for case_no in case_nos}
+        if target_tail in entry_tails:
+            matched_entries.append(entry)
+    return matched_entries
 
 class EcourtsWebScraper:
     def __init__(self):
@@ -214,6 +354,228 @@ class EcourtsWebScraper:
                 standard_cases.append(std_case)
             return standard_cases
         return []
+
+    def _format_causelist_date(self, listing_date: str) -> str:
+        value = (listing_date or "").strip()
+        if not value:
+            return value
+
+        if re.fullmatch(r"\d{2}-\d{2}-\d{4}", value):
+            return value
+
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            year, month, day = value.split("-")
+            return f"{day}-{month}-{year}"
+
+        return value
+
+    def _extract_pdf_links_from_payload(self, payload: Any) -> List[str]:
+        links: List[str] = []
+        seen = set()
+
+        def _add(link: str) -> None:
+            if not link:
+                return
+            cleaned = html.unescape(link.strip())
+            if not cleaned:
+                return
+            if not cleaned.lower().startswith(("http://", "https://")):
+                cleaned = urljoin(f"{self.base_url}/", cleaned.lstrip("/"))
+            cleaned = cleaned.replace("\\/", "/")
+            if cleaned.lower().endswith(".pdf") and cleaned not in seen:
+                seen.add(cleaned)
+                links.append(cleaned)
+
+        def _scan(value: Any) -> None:
+            if isinstance(value, dict):
+                for nested in value.values():
+                    _scan(nested)
+                return
+            if isinstance(value, list):
+                for nested in value:
+                    _scan(nested)
+                return
+            if not isinstance(value, str):
+                return
+
+            for match in re.findall(r"(?:href|src)=[\"']([^\"']+\.pdf(?:\?[^\"']*)?)[\"']", value, flags=re.I):
+                _add(match)
+
+            for match in re.findall(r"https?://[^\s\"'>]+\.pdf(?:\?[^\s\"'>]+)?", value, flags=re.I):
+                _add(match)
+
+            for match in re.findall(r"[A-Za-z0-9_\-/\.]+\.pdf(?:\?[^\s\"'>]+)?", value, flags=re.I):
+                if "/" in match:
+                    _add(match)
+
+        _scan(payload)
+        return links
+
+    def _download_pdf_bytes(self, pdf_url: str) -> bytes:
+        response = self.session.get(pdf_url, verify=False, timeout=30)
+        response.raise_for_status()
+        return response.content
+
+    def fetch_cause_list(
+        self,
+        state_code: str,
+        dist_code: str,
+        court_complex_code_full: str,
+        listing_date: str,
+        est_code: str = "",
+        registration_no: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fetch District Court cause-list PDF(s) and parse case-number entries.
+        If registration_no is provided, only matching entries are returned in
+        `matched_entries` while `entries` contains all parsed case-number entries.
+        """
+        if not self.app_token and not self.initialize_session():
+            return {"status": "error", "msg": "Failed to initialize session"}
+
+        parts = (court_complex_code_full or "").split("@")
+        complex_code = parts[0] if parts else ""
+        formatted_date = self._format_causelist_date(listing_date)
+
+        # Prime causelist page cookies/context.
+        try:
+            self.session.get(f"{self.base_url}/?p=clsearch/index", verify=False, timeout=30)
+        except Exception:
+            logger.debug("Unable to pre-load clsearch index", exc_info=True)
+
+        payload_candidates = [
+            {
+                "state_code": state_code,
+                "dist_code": dist_code,
+                "court_complex_code": complex_code,
+                "est_code": est_code,
+                "listing_date": formatted_date,
+            },
+            {
+                "state_code": state_code,
+                "dist_code": dist_code,
+                "court_complex_code": complex_code,
+                "est_code": est_code,
+                "cause_list_date": formatted_date,
+            },
+            {
+                "state_code": state_code,
+                "dist_code": dist_code,
+                "court_complex_code": complex_code,
+                "est_code": est_code,
+                "date_from": formatted_date,
+                "date_to": formatted_date,
+            },
+        ]
+        endpoint_candidates = [
+            "clsearch/submit",
+            "clsearch/submitDate",
+            "clsearch/getCauselist",
+            "clsearch/showlist",
+            "clsearch/display",
+        ]
+
+        response_payloads: List[Any] = []
+        pdf_links: List[str] = []
+
+        for endpoint in endpoint_candidates:
+            if pdf_links:
+                break
+            for payload in payload_candidates:
+                try:
+                    resp = self._post(endpoint, payload.copy())
+                    response_payloads.append(resp)
+                    links = self._extract_pdf_links_from_payload(resp)
+                    if links:
+                        pdf_links.extend(links)
+                        break
+                except Exception:
+                    logger.debug("Cause-list request failed for endpoint %s", endpoint, exc_info=True)
+
+        # Fallback: scan clsearch page itself for direct PDF links.
+        if not pdf_links:
+            try:
+                index_resp = self.session.get(
+                    f"{self.base_url}/?p=clsearch/index",
+                    verify=False,
+                    timeout=30,
+                )
+                response_payloads.append(index_resp.text)
+                pdf_links.extend(self._extract_pdf_links_from_payload(index_resp.text))
+            except Exception:
+                logger.debug("Failed to scan clsearch index for PDF links", exc_info=True)
+
+        # Deduplicate while preserving order.
+        deduped_links: List[str] = []
+        seen_links = set()
+        for link in pdf_links:
+            if link not in seen_links:
+                seen_links.add(link)
+                deduped_links.append(link)
+
+        pdf_results: List[Dict[str, Any]] = []
+        all_entries: List[Dict[str, Any]] = []
+        matched_entries: List[Dict[str, Any]] = []
+
+        for pdf_url in deduped_links:
+            try:
+                pdf_bytes = self._download_pdf_bytes(pdf_url)
+            except Exception as exc:
+                pdf_results.append(
+                    {
+                        "url": pdf_url,
+                        "status": "error",
+                        "error": str(exc),
+                        "entries": [],
+                        "matched_entries": [],
+                    }
+                )
+                continue
+
+            tmp_path: Optional[str] = None
+            try:
+                with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                    tmp_pdf.write(pdf_bytes)
+                    tmp_path = tmp_pdf.name
+
+                parsed_entries = parse_dc_cause_list_pdf(tmp_path)
+                if registration_no:
+                    parsed_matched_entries = find_dc_case_entries(tmp_path, registration_no)
+                else:
+                    parsed_matched_entries = parsed_entries
+
+                pdf_results.append(
+                    {
+                        "url": pdf_url,
+                        "status": "success",
+                        "entries": parsed_entries,
+                        "matched_entries": parsed_matched_entries,
+                    }
+                )
+                all_entries.extend(parsed_entries)
+                matched_entries.extend(parsed_matched_entries)
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+        if not deduped_links:
+            return {
+                "status": "error",
+                "msg": "Could not locate cause-list PDF links from District Court cause-list responses",
+                "listing_date": formatted_date,
+                "responses_checked": len(response_payloads),
+                "pdfs": [],
+                "entries": [],
+                "matched_entries": [],
+            }
+
+        return {
+            "status": "success",
+            "listing_date": formatted_date,
+            "pdfs": pdf_results,
+            "entries": all_entries,
+            "matched_entries": matched_entries,
+        }
 
     def get_case_details(self, case_params):
         """
@@ -606,4 +968,3 @@ if __name__ == "__main__":
         print("Result:", result)
     else:
         print("Failed to initialize session.")
-
