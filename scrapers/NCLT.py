@@ -1,9 +1,15 @@
+import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
+from datetime import datetime, timedelta
 from urllib import parse
 
+import fitz  # PyMuPDF
 import requests
+from bs4 import BeautifulSoup
 from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
                       wait_exponential)
 
@@ -17,6 +23,9 @@ BASE_URL = 'https://efiling.nclt.gov.in/'
 SEARCH_URL = 'https://efiling.nclt.gov.in/caseHistoryoptional.drt'
 DETAILS_URL = 'https://efiling.nclt.gov.in/caseHistoryalldetails.drt'
 ORDERS_URL = 'https://efiling.nclt.gov.in/ordersview.drt'
+
+NCLT_GOV_URL = 'https://nclt.gov.in'
+CAUSE_LIST_URL = f'{NCLT_GOV_URL}/all-couse-list'
 
 session = requests.Session()
 session.verify = False
@@ -53,6 +62,56 @@ BENCH_MAP = {
     'prayagraj': '2',
 }
 
+CAUSE_LIST_BENCH_MAP = {
+    "ahmedabad bench court-i": "88",
+    "ahmedabad bench court-ii": "89",
+    "allahabad bench court-i": "90",
+    "amaravati bench court-i": "91",
+    "bengaluru bench court-i": "92",
+    "chandigarh bench court-i": "93",
+    "chandigarh bench court-ii": "137",
+    "chennai bench court-i": "94",
+    "chennai bench court-ii": "95",
+    "cuttack bench court-i": "96",
+    "guwahati bench court-i": "97",
+    "hyderabad bench court-i": "98",
+    "hyderabad bench court-ii": "99",
+    "indore bench court-i": "100",
+    "jaipur bench court-i": "101",
+    "kochi bench court-i": "102",
+    "kolkata bench court ii": "103",
+    "kolkata bench court-3": "139",
+    "kolkata bench court-i": "104",
+    "mumbai bench court-i": "105",
+    "mumbai bench court-ii": "106",
+    "mumbai bench court-iii": "107",
+    "mumbai bench court-iv": "108",
+    "mumbai bench court-v": "109",
+    "mumbai bench court-vi": "128",
+    "new delhi bench court-ii": "110",
+    "new delhi bench court-iii": "111",
+    "new delhi bench court-iv": "112",
+    "new delhi bench court-v": "113",
+    "new delhi bench court-vi": "114",
+    "principal bench court-i": "115",
+    "registrar nclt court-i": "116",
+}
+
+CASE_NO_PATTERN = re.compile(r"\b(?:CP|IA|MA|CA|TCP|TP|C\.P\.)(?:\s*\(\s*IB\s*\))?[\s\./-]*\d+.*?\d{4}\b", re.IGNORECASE)
+
+def _normalize_case_token(case_no: str) -> str:
+    return re.sub(r"\s+", "", (case_no or "").upper())
+
+def _case_tail(case_no: str) -> str:
+    token = _normalize_case_token(case_no)
+    # Extract digits/digits (e.g. 443/2025) or just digits
+    match = re.search(r"(\d+)[\D]+(\d{4})", token)
+    if match:
+        return f"{match.group(1)}{match.group(2)}"
+    # Fallback to removing all non-alphanumeric and some common prefixes
+    token = re.sub(r"^(?:CP|IA|MA|CA|TCP|TP|C\.P\.)(?:\(IB\))?", "", token)
+    return re.sub(r"[^A-Z0-9]", "", token)
+
 def get_bench_id(bench_name):
     if not bench_name:
         return '0'
@@ -62,6 +121,19 @@ def get_bench_id(bench_name):
         if key in normalized:
             return val
     return '0'
+
+def get_cause_list_bench_id(bench_name):
+    if not bench_name:
+        return 'All'
+    normalized = bench_name.lower().strip()
+    for key, val in CAUSE_LIST_BENCH_MAP.items():
+        if key in normalized:
+            return val
+    # Fallback to prefix match
+    for key, val in CAUSE_LIST_BENCH_MAP.items():
+        if normalized in key:
+            return val
+    return 'All'
 
 def _standardize_result(item):
     """
@@ -77,6 +149,212 @@ def _standardize_result(item):
         'case_no': item.get('case_no'),
         'bench': item.get('bench_location_name')
     }
+
+def solve_math_captcha(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    captcha_sid = soup.find('input', {'name': 'captcha_sid'})['value']
+    captcha_token = soup.find('input', {'name': 'captcha_token'})['value']
+    
+    captcha_text = soup.find('span', {'class': 'field-prefix'}).text
+    # Example: "14 + 6 ="
+    match = re.search(r'(\d+)\s*([\+\-\*])\s*(\d+)', captcha_text)
+    if not match:
+        raise ValueError(f"Could not parse math captcha: {captcha_text}")
+    
+    v1, op, v2 = match.groups()
+    if op == '+':
+        res = int(v1) + int(v2)
+    elif op == '-':
+        res = int(v1) - int(v2)
+    elif op == '*':
+        res = int(v1) * int(v2)
+    else:
+        raise ValueError(f"Unsupported operator: {op}")
+        
+    return captcha_sid, captcha_token, str(res)
+
+def fetch_cause_list_pdfs(bench_name: str, date: datetime) -> list[str]:
+    """
+    Fetch cause list PDFs for a given bench and date.
+    Returns a list of URLs to the PDFs.
+    """
+    bench_id = get_cause_list_bench_id(bench_name)
+    date_str = date.strftime("%m/%d/%Y")
+    
+    # 1. Get initial page to get CAPTCHA
+    resp = requests.get(CAUSE_LIST_URL, verify=False)
+    resp.raise_for_status()
+    
+    try:
+        sid, token, solution = solve_math_captcha(resp.text)
+    except Exception as e:
+        logger.error(f"Failed to solve CAPTCHA: {e}")
+        return []
+        
+    # 2. Submit search
+    params = {
+        'field_nclt_benches_list_target_id': bench_id,
+        'field_cause_date_value': date_str,
+        'field_cause_date_value_1': date_str,
+        'captcha_sid': sid,
+        'captcha_token': token,
+        'captcha_response': solution
+    }
+    
+    resp = requests.get(CAUSE_LIST_URL, params=params, verify=False)
+    resp.raise_for_status()
+    
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    table = soup.find('table', {'class': 'views-table'})
+    if not table:
+        return []
+        
+    pdf_urls = []
+    for row in table.find_all('tr'):
+        link = row.find('a', href=re.compile(r'\.pdf$'))
+        if link:
+            pdf_urls.append(link['href'])
+            
+    return pdf_urls
+
+def _clean_pdf_line(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("Page ") and " of " in cleaned:
+        return ""
+    return cleaned
+
+def _parse_single_cause_list_entry(entry: dict) -> dict:
+    raw_lines = entry.get("raw_lines") or []
+    text = "\n".join(raw_lines).strip()
+    
+    case_numbers: list[str] = []
+    seen = set()
+    for line in raw_lines:
+        for token in CASE_NO_PATTERN.findall(line):
+            normalized = _normalize_case_token(token)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                case_numbers.append(normalized)
+    
+    entry_hash_src = f"{entry.get('item_no')}|{entry.get('page_no')}|{text}"
+    entry_hash = hashlib.sha256(entry_hash_src.encode("utf-8")).hexdigest()
+
+    return {
+        "item_no": entry.get("item_no"),
+        "page_no": entry.get("page_no"),
+        "case_no": case_numbers[0] if case_numbers else None,
+        "case_nos": case_numbers,
+        "text": text,
+        "entry_hash": entry_hash,
+    }
+
+def parse_cause_list_pdf(pdf_path: str) -> list[dict]:
+    """
+    Parse NCLT cause-list PDF and extract structured entries.
+    """
+    entries: list[dict] = []
+    
+    with fitz.open(pdf_path) as doc:
+        open_entry = None
+        
+        for page_idx in range(doc.page_count):
+            page = doc[page_idx]
+            words = page.get_text("words")
+            # Sort by y then x
+            words.sort(key=lambda w: (w[1], w[0]))
+            
+            lines = []
+            current_y = -1
+            current_line = []
+            
+            for w in words:
+                x0, y0, x1, y1, text = w[:5]
+                if abs(y0 - current_y) > 3:
+                    if current_line:
+                        # Sort by x
+                        current_line.sort(key=lambda it: it['x'])
+                        lines.append(current_line)
+                    current_line = []
+                    current_y = y0
+                current_line.append({'x': x0, 'y': y0, 'text': text})
+            
+            if current_line:
+                current_line.sort(key=lambda it: it['x'])
+                lines.append(current_line)
+
+            # Look for table header on this page or previous
+            has_header = False
+            header_y = -1
+            for line in lines:
+                line_text = " ".join(it['text'] for it in line).upper()
+                if "CP/CA/IA/MA" in line_text or "SECTION/RULE" in line_text:
+                    has_header = True
+                    header_y = line[0]['y']
+                    break
+            
+            if not has_header and not open_entry:
+                continue
+                
+            # Filter lines below header
+            content_lines = []
+            if has_header:
+                content_lines = [l for l in lines if l[0]['y'] > header_y]
+            else:
+                content_lines = lines
+
+            # Detect row starts (item numbers in column 1 or case numbers in column 2)
+            for line in content_lines:
+                item_no_candidate = None
+                case_no_candidate = False
+                
+                first_token_x = line[0]['x']
+                line_text = " ".join(it['text'] for it in line)
+                
+                # Column 1 (Sr. No): x < 80
+                if first_token_x < 80 and re.fullmatch(r'\d{1,4}', line[0]['text']):
+                    item_no_candidate = line[0]['text']
+                
+                # Column 2 (Case No): 80 <= x < 160
+                # If we don't have an item number, check if this line looks like a new case start
+                if not item_no_candidate:
+                    if 80 <= first_token_x < 160 and CASE_NO_PATTERN.search(line_text):
+                        case_no_candidate = True
+                
+                if item_no_candidate or case_no_candidate:
+                    if open_entry:
+                        entries.append(_parse_single_cause_list_entry(open_entry))
+                    open_entry = {
+                        "item_no": item_no_candidate or "",
+                        "page_no": page_idx + 1,
+                        "raw_lines": [line_text]
+                    }
+                else:
+                    if open_entry:
+                        if line_text:
+                            open_entry["raw_lines"].append(line_text)
+
+        if open_entry:
+            entries.append(_parse_single_cause_list_entry(open_entry))
+            
+    return [e for e in entries if e.get("case_nos")]
+
+def find_case_entries(pdf_path: str, case_no: str) -> list[dict]:
+    """
+    Find cause-list entries matching a case number.
+    """
+    target_tail = _case_tail(case_no)
+    parsed = parse_cause_list_pdf(pdf_path)
+    if not target_tail:
+        return parsed
+        
+    matched = []
+    for entry in parsed:
+        tails = [_case_tail(cn) for cn in entry.get("case_nos", [])]
+        if target_tail in tails:
+            matched.append(entry)
+    return matched
 
 @retry(
     retry=retry_if_exception_type(requests.exceptions.RequestException),
