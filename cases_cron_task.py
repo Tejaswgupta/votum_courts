@@ -6,22 +6,20 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from cron_jobs.task_email import send_smtp_email
+from cron_jobs.task_notifications import send_fcm_notification
+from cron_jobs.task_sms import send_sms_message
 from dotenv import load_dotenv
 from ecourts import hc_services
 from ecourts.ecourts import EcourtsService
 from ecourts.gujarat_hc import get_gujarat_case_details
 from ecourts.gujarat_hc import \
     persist_orders_to_storage as gujarat_persist_orders_to_storage
-from ecourts.scrapers.NCLAT import nclat_get_details
 from ecourts.scrapers.NCLT import nclt_get_details
 from ecourts.scrapers.NCLT import \
     persist_orders_to_storage as nclt_persist_orders_to_storage
 
 from supabase import Client, create_client
-
-from cron_jobs.task_email import send_smtp_email
-from cron_jobs.task_notifications import send_fcm_notification
-from cron_jobs.task_sms import send_sms_message
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

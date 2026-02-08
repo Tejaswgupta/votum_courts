@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-from . import hc_services
+from . import bombay_hc, gujarat_hc, hc_services
 from .bombay_hc import get_bombay_case_details
 from .bombay_hc import \
     persist_orders_to_storage as bombay_persist_orders_to_storage
@@ -20,19 +20,7 @@ from .gujarat_hc import get_gujarat_case_details
 from .gujarat_hc import \
     persist_orders_to_storage as gujarat_persist_orders_to_storage
 from .hc_services import hc_get_benches, hc_get_case_types, hc_get_states
-from .scrapers import (cestat_extract_case_details, cestat_search_by_case_no,
-                       cestat_search_by_diary, cestat_search_by_oia,
-                       cestat_search_by_party_name, drt_get_details,
-                       drt_search_by_case_number, drt_search_by_diary_number,
-                       drt_search_by_party_name, itat_get_details,
-                       itat_search_by_appeal_number,
-                       itat_search_by_assesee_name, itat_search_by_filing_date,
-                       ncdrc_search, ncdrc_simple_search, nclat_get_details,
-                       nclat_search_by_advocate_name, nclat_search_by_case_no,
-                       nclat_search_by_case_type,
-                       nclat_search_by_filing_number,
-                       nclat_search_by_free_text, nclat_search_by_party_name,
-                       nclt_get_details, nclt_search_by_advocate_name,
+from .scrapers import (nclt_get_details, nclt_search_by_advocate_name,
                        nclt_search_by_case_number,
                        nclt_search_by_filing_number, nclt_search_by_party_name)
 from .scrapers import \
@@ -63,58 +51,6 @@ async def search_by_advocate_name(
         advocate_name=advocate_name,
     )
 
-
-
-
-
-@router.get("/search_cestat_search_by_diary/")
-async def search_cestat_search_by_diary(diary_num: str, year: str, bench: str):
-    return cestat_search_by_diary(diary_num, year, bench)
-
-
-@router.get("/search_cestat_search_by_case_no/")
-async def search_cestat_search_by_case_no(case_type: str, case_no: str, year: str, bench: str):
-    return cestat_search_by_case_no(case_type, case_no, year, bench)
-
-
-@router.get("/search_cestat_search_by_party_name/")
-async def search_cestat_search_by_party_name(party_name: str, bench: str):
-    return cestat_search_by_party_name(party_name, bench)
-
-
-@router.get("/search_cestat_search_by_oia/")
-async def search_cestat_search_by_oia(oia: str, bench: str):
-    return cestat_search_by_oia(oia, bench)
-
-
-@router.get("/search_drt_search_by_diary_number/")
-async def search_drt_search_by_diary_number(drat: str, diary_no: str, diary_year: str):
-    return drt_search_by_diary_number(drat, diary_no, diary_year)
-
-
-@router.get("/search_drt_search_by_case_number/")
-async def search_drt_search_by_case_number(drat: str, case_type: str, case_no: str, case_year: str):
-    return drt_search_by_case_number(drat, case_type, case_no, case_year)
-
-
-@router.get("/search_drt_search_by_party_name/")
-async def search_drt_search_by_party_name(drat: str, party_name: str):
-    return drt_search_by_party_name(drat, party_name)
-
-
-@router.get("/search_itat_search_by_appeal_number/")
-async def search_itat_search_by_appeal_number(bench: str, appeal_type: str, number: str, year: str):
-    return itat_search_by_appeal_number(bench, appeal_type, number, year)
-
-
-@router.get("/search_itat_search_by_filing_date/")
-async def search_itat_search_by_filing_date(bench: str, appeal_type: str, date_of_filing: str):
-    return itat_search_by_filing_date(bench, appeal_type, date_of_filing)
-
-
-@router.get("/search_itat_search_by_assesee_name/")
-async def search_itat_search_by_assesee_name(bench: str, appeal_type: str, assesee_name: str):
-    return itat_search_by_assesee_name(bench, appeal_type, assesee_name)
 
 
 @router.get("/search_ncdrc_search/")
@@ -158,26 +94,6 @@ async def search_nclat_search_by_free_text(
     location: str, search_by: str, free_text: str, from_date: str, to_date: str
 ):
     return nclat_search_by_free_text(location, search_by, free_text, from_date, to_date)
-
-
-@router.get("/search_nclat_search_by_filing_number/")
-async def search_nclat_search_by_filing_number(location: str, filing_no: str):
-    return nclat_search_by_filing_number(location, filing_no)
-
-
-@router.get("/search_nclat_search_by_case_type/")
-async def search_nclat_search_by_case_type(location: str, case_type: str, status: str):
-    return nclat_search_by_case_type(location, case_type, status)
-
-
-@router.get("/search_nclat_search_by_party_name/")
-async def search_nclat_search_by_party_name(location: str, party_type: str, party_name: str):
-    return nclat_search_by_party_name(location, party_type, party_name)
-
-
-@router.get("/search_nclat_search_by_advocate_name/")
-async def search_nclat_search_by_advocate_name(location: str, representative_name: str):
-    return nclat_search_by_advocate_name(location, representative_name)
 
 
 @router.get("/search_nclt_search_by_filing_number/")
@@ -241,31 +157,6 @@ async def search_sci_search_by_court(
     return sci_search_by_court(
         court, state, bench, case_type, case_number, case_year, order_date
     )
-
-
-@router.get("/cestat_details/")
-async def cestat_details(diary_number: str, bench: str):
-    return cestat_extract_case_details(diary_number, bench)
-
-
-@router.get("/drt_details/")
-async def drt_details(diary_no: str, diary_year: str, scheme_name_drt_id: str):
-    return drt_get_details(diary_no, diary_year, scheme_name_drt_id)
-
-
-@router.get("/itat_details/")
-async def itat_details(case_action_id: str):
-    return itat_get_details(case_action_id)
-
-
-@router.get("/ncdrc_details/")
-async def ncdrc_details(state_code: str, dist_code: str, fano: str):
-    return ncdrc_simple_search(state_code, dist_code, fano)
-
-
-@router.get("/nclat_details/")
-async def nclat_details(filing_no: str, bench: str):
-    return nclat_get_details(filing_no, bench)
 
 
 @router.get("/nclt_details/")
