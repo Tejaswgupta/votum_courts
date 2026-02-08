@@ -15,8 +15,8 @@ from ecourts.ecourts import EcourtsService
 from ecourts.gujarat_hc import get_gujarat_case_details
 from ecourts.gujarat_hc import \
     persist_orders_to_storage as gujarat_persist_orders_to_storage
-from ecourts.scrapers.NCLT import nclt_get_details
-from ecourts.scrapers.NCLT import \
+from ecourts.NCLT import nclt_get_details
+from ecourts.NCLT import \
     persist_orders_to_storage as nclt_persist_orders_to_storage
 
 from supabase import Client, create_client

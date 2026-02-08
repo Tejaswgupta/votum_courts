@@ -20,14 +20,13 @@ from .gujarat_hc import get_gujarat_case_details
 from .gujarat_hc import \
     persist_orders_to_storage as gujarat_persist_orders_to_storage
 from .hc_services import hc_get_benches, hc_get_case_types, hc_get_states
-from .scrapers import (nclt_get_details, nclt_search_by_advocate_name,
-                       nclt_search_by_case_number,
-                       nclt_search_by_filing_number, nclt_search_by_party_name)
-from .scrapers import \
-    persist_orders_to_storage as nclt_persist_orders_to_storage
-from .scrapers import (sci_get_details, sci_search_by_aor_code,
-                       sci_search_by_case_number, sci_search_by_court,
-                       sci_search_by_diary_number, sci_search_by_party_name)
+from .NCLT import (nclt_get_details, nclt_search_by_advocate_name,
+                   nclt_search_by_case_number, nclt_search_by_filing_number,
+                   nclt_search_by_party_name)
+from .NCLT import persist_orders_to_storage as nclt_persist_orders_to_storage
+from .SCI import (sci_get_details, sci_search_by_aor_code,
+                  sci_search_by_case_number, sci_search_by_court,
+                  sci_search_by_diary_number, sci_search_by_party_name)
 from .search import ConciseJson, SearchResultData
 
 router = APIRouter(prefix="/ecourts", tags=["ecourts"])
