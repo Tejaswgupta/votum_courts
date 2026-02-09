@@ -1,5 +1,6 @@
 import ast
 import asyncio
+from datetime import datetime
 import logging
 import operator
 import os
@@ -121,6 +122,40 @@ def _extract_html_fragment(payload: dict[str, Any]) -> Optional[str]:
         return None
 
     return html_fragment
+
+
+def _extract_order_date(text: Optional[str]) -> Optional[str]:
+    value = (text or "").strip()
+    if not value:
+        return None
+
+    formats = [
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d-%m-%y",
+        "%d/%m/%y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    match = re.search(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})", value)
+    if not match:
+        return None
+
+    day, month, year = match.groups()
+    year = f"20{year}" if len(year) == 2 else year
+    try:
+        return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
 
 
 def _normalize_captcha_expression(question: str) -> str:
@@ -356,6 +391,7 @@ def _parse_judgement_orders(html_fragment: str) -> list[dict[str, Any]]:
 
         date_text = link.get_text(" ", strip=True)
         full_text = cell.get_text(" ", strip=True)
+        extracted_date = _extract_order_date(date_text) or _extract_order_date(full_text)
         trailing = full_text[len(date_text) :].strip()
         trailing = trailing.replace("\xa0", " ").strip()
         if trailing.startswith("[") and trailing.endswith("]"):
@@ -363,7 +399,7 @@ def _parse_judgement_orders(html_fragment: str) -> list[dict[str, Any]]:
 
         rows.append(
             {
-                "date": date_text,
+                "date": extracted_date or date_text,
                 "description": trailing or None,
                 "document_url": link.get("href"),
             }

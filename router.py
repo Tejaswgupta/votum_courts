@@ -380,12 +380,12 @@ async def web_search_by_case_number(
     case_type: str,
     case_no: str,
     year: str,
-    est_code: str = "",
 ):
     scraper = EcourtsWebScraper()
     if scraper.initialize_session():
+        print(f"Searching eCourts web with state_code={state_code}, dist_code={dist_code}, complex_code={complex_code}, case_type={case_type}, case_no={case_no}, year={year}")
         return scraper.search_case(
-            state_code, dist_code, complex_code, est_code, case_type, case_no, year
+            state_code, dist_code, complex_code, case_type, case_no, year
         )
     return {"error": "Failed to initialize session"}
 

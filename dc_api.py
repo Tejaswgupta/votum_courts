@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
@@ -53,6 +54,40 @@ def _clean_pdf_line(text: str) -> str:
     if cleaned.startswith("Created on "):
         return ""
     return cleaned
+
+
+def _normalize_order_date(date_str: Optional[str]) -> Optional[str]:
+    value = (date_str or "").strip()
+    if not value:
+        return None
+
+    formats = [
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d-%m-%y",
+        "%d/%m/%y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    match = re.search(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})", value)
+    if not match:
+        return None
+
+    day, month, year = match.groups()
+    year = f"20{year}" if len(year) == 2 else year
+    try:
+        return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
 
 
 def parse_dc_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
@@ -331,7 +366,7 @@ class EcourtsWebScraper:
         if not self.app_token:
             self.initialize_session()
             
-        result = self.search_case(state_code, dist_code, court_complex_code, est_code, case_type, case_no, year)
+        result = self.search_case(state_code, dist_code, court_complex_code, case_type, case_no, year)
         
         if result.get('status') == 'success':
             standard_cases = []
@@ -763,7 +798,7 @@ class EcourtsWebScraper:
                         
                         details['orders'].append({
                             'order_no': order_no,
-                            'date': order_date,
+                            'date': _normalize_order_date(order_date) or order_date,
                             'description': order_details,
                             'document_url': document_url,
                             'pdf_params': pdf_params
@@ -771,7 +806,7 @@ class EcourtsWebScraper:
                         
         return details
 
-    def search_case(self, state_code, dist_code, court_complex_code_full, est_code, case_type, case_no, year):
+    def search_case(self, state_code, dist_code, court_complex_code_full, case_type, case_no, year):
         parts = court_complex_code_full.split('@')
         complex_code = parts[0]
         
@@ -800,7 +835,7 @@ class EcourtsWebScraper:
                 'state_code': state_code,
                 'dist_code': dist_code,
                 'court_complex_code': complex_code,
-                'est_code': est_code,
+                'est_code': '',
                 'submit_btn': 'Go'
             }
             
@@ -960,7 +995,6 @@ if __name__ == "__main__":
             args.state, 
             args.district, 
             args.complex, 
-            args.est, 
             args.casetype, 
             args.caseno, 
             args.year

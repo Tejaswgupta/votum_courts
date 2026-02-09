@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timedelta
+from typing import Optional
 from urllib import parse
 
 import fitz  # PyMuPDF
@@ -111,6 +112,40 @@ def _case_tail(case_no: str) -> str:
     # Fallback to removing all non-alphanumeric and some common prefixes
     token = re.sub(r"^(?:CP|IA|MA|CA|TCP|TP|C\.P\.)(?:\(IB\))?", "", token)
     return re.sub(r"[^A-Z0-9]", "", token)
+
+
+def _normalize_order_date(date_str: Optional[str]) -> Optional[str]:
+    value = (date_str or "").strip()
+    if not value or value.upper() == "NA":
+        return None
+
+    formats = [
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    match = re.search(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})", value)
+    if not match:
+        return None
+
+    day, month, year = match.groups()
+    year = f"20{year}" if len(year) == 2 else year
+    try:
+        return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
 
 def get_bench_id(bench_name):
     if not bench_name:
@@ -530,9 +565,11 @@ def nclt_get_details(bench, filing_no):
             order_path = proc.get('encPath') # This is the 'path' param for ordersview.drt
             # Construct URL: https://efiling.nclt.gov.in/ordersview.drt?path={encPath}
             order_url = f"{ORDERS_URL}?path={parse.quote(order_path)}" if order_path and order_path != 'NA' else None
+            parsed_order_date = _normalize_order_date(proc.get('order_upload_date'))
+            parsed_listing_date = _normalize_order_date(proc.get('listing_date'))
             
             orders.append({
-                "date": proc.get('order_upload_date') or proc.get('listing_date'),
+                "date": parsed_order_date or parsed_listing_date or proc.get('order_upload_date') or proc.get('listing_date'),
                 "description": f"Listing: {proc.get('listing_date')} | Purpose: {proc.get('purpose')} | Action: {proc.get('today_action')}",
                 "document_url": order_url,
                 "source_document_url": order_url,

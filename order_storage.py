@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from typing import Callable, Optional, Union, List, Dict
@@ -32,10 +33,55 @@ def _default_fetch(order_url: str, referer: Optional[str] = None) -> requests.Re
     return requests.get(order_url, timeout=30, headers=headers)
 
 
+def _format_order_timestamp(order_date: Optional[Union[str, datetime]]) -> str:
+    """
+    Format order date to dd-mm-yy for filenames.
+    Falls back to current date if the source value is missing/unparseable.
+    """
+    if isinstance(order_date, datetime):
+        return order_date.strftime("%d-%m-%y")
+
+    if isinstance(order_date, str):
+        cleaned = order_date.strip()
+        if cleaned:
+            known_formats = [
+                "%d-%m-%Y",
+                "%d-%m-%y",
+                "%d/%m/%Y",
+                "%d/%m/%y",
+                "%Y-%m-%d",
+                "%Y/%m/%d",
+                "%d.%m.%Y",
+                "%d %b %Y",
+                "%d %B %Y",
+            ]
+            for fmt in known_formats:
+                try:
+                    return datetime.strptime(cleaned, fmt).strftime("%d-%m-%y")
+                except ValueError:
+                    continue
+
+            match = re.search(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})", cleaned)
+            if match:
+                day, month, year = match.groups()
+                year = f"20{year}" if len(year) == 2 else year
+                try:
+                    return datetime(
+                        int(year),
+                        int(month),
+                        int(day),
+                    ).strftime("%d-%m-%y")
+                except ValueError:
+                    pass
+
+    return datetime.now().strftime("%d-%m-%y")
+
+
 def _upload_order_document(
     order_url: Optional[str],
     order_index: int,
     case_id: Optional[str],
+    order_date: Optional[Union[str, datetime]],
     supabase_client: Optional[Client],
     fetch_fn: Optional[Callable[[str, Optional[str]], requests.Response]] = None,
     referer: Optional[str] = None,
@@ -74,8 +120,8 @@ def _upload_order_document(
     if not resp.content:
         return None
 
-    #use timestamp in dd-mm-yy format to avoid overwriting
-    timestamp = datetime.now().strftime("%d-%m-%y")
+    # Use order passed date in dd-mm-yy format to avoid "today" timestamp drift.
+    timestamp = _format_order_timestamp(order_date)
     storage_filename = f"order-{timestamp}.pdf"
     storage_path = f"case-{case_id}/Orders/{storage_filename}"
 
@@ -140,6 +186,7 @@ async def persist_orders_to_storage(
                 raw_url,
                 idx,
                 case_id,
+                order.get("date"),
                 supabase_client,
                 fetch_fn,
                 referer,
@@ -288,7 +335,7 @@ async def persist_orders_to_storage(
             except Exception:
                 pass
 
-            timestamp = datetime.now().strftime("%d-%m-%y")
+            timestamp = _format_order_timestamp(order.get("date"))
             filename = f"order-{timestamp}.pdf"
             payload = {
                 "workspace_id": workspace_id,

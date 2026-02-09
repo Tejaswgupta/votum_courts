@@ -450,8 +450,33 @@ class GujaratHCService:
     def _parse_date(self, date_str: str) -> Optional[str]:
         if not date_str or date_str.strip() in ['-', '', 'NA']:
             return None
+        value = date_str.strip()
+
+        formats = [
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+            "%d/%m/%y",
+            "%d-%m-%y",
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%d.%m.%Y",
+            "%d %b %Y",
+            "%d %B %Y",
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+
+        match = re.search(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})", value)
+        if not match:
+            return None
+
+        day, month, year = match.groups()
+        year = f"20{year}" if len(year) == 2 else year
         try:
-            return datetime.strptime(date_str.strip(), "%d/%m/%Y").strftime("%Y-%m-%d")
+            return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
         except ValueError:
             return None
 
