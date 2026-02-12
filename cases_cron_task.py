@@ -368,7 +368,7 @@ def fetch_cases(supabase: Client, limit: int | None = None) -> list[dict]:
         .select(
             "id, cin_no, filling_no, next_listing_date, orders, case_no, case_type, "
             "registration_no, bench_name, court_name, petitioner, respondent, "
-            "assigned_user_ids, reminder_contacts, workspace_id"
+            "assigned_user_ids, reminder_contacts, workspace_id, ia_details"
         )
         .order("id")
     )
@@ -600,6 +600,12 @@ def sync_case_record(
     existing_next = case_record.get("next_listing_date")
     existing_orders = case_record.get("orders") or []
     incoming_orders = hc_data.get("orders") or []
+    existing_ia_details = case_record.get("ia_details") or []
+    incoming_ia_details = (
+        hc_data.get("ia_details")
+        or (hc_data.get("original_json") or {}).get("ia_details")
+        or []
+    )
 
     merged_orders, added_orders, added_orders_list = merge_orders(
         existing_orders, incoming_orders
@@ -610,9 +616,16 @@ def sync_case_record(
         update_payload["next_listing_date"] = next_listing_date
     if added_orders:
         update_payload["orders"] = merged_orders
+    if court_key == "GUJ_HC" and incoming_ia_details != existing_ia_details:
+        update_payload["ia_details"] = incoming_ia_details
 
     if not update_payload:
-        return {"case_id": case_id, "status": "no_change", "added_orders": 0}
+        return {
+            "case_id": case_id,
+            "status": "no_change",
+            "added_orders": 0,
+            "ia_details_updated": False,
+        }
 
     if dry_run:
         logger.info("Dry run: would update case %s with %s", case_id, update_payload)
@@ -620,6 +633,10 @@ def sync_case_record(
             "case_id": case_id,
             "status": "dry_run",
             "added_orders": added_orders,
+            "ia_details_updated": bool(
+                court_key == "GUJ_HC"
+                and incoming_ia_details != existing_ia_details
+            ),
         }
 
     if added_orders:
@@ -666,6 +683,10 @@ def sync_case_record(
         "case_id": case_id,
         "status": "updated",
         "added_orders": added_orders,
+        "ia_details_updated": bool(
+            court_key == "GUJ_HC"
+            and incoming_ia_details != existing_ia_details
+        ),
     }
 
 

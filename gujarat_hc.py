@@ -480,6 +480,21 @@ class GujaratHCService:
         except ValueError:
             return None
 
+    def _get_section_records(
+        self, data: List[Dict[str, Any]], section_key: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Gujarat HC response array ordering can vary between requests/cases.
+        Find records by section key instead of hardcoded indexes.
+        """
+        for section in data:
+            if not isinstance(section, dict):
+                continue
+            records = section.get(section_key)
+            if isinstance(records, list):
+                return records
+        return []
+
     def fetch_order_document(self, order_params: Dict[str, str]) -> requests.Response:
         """
         Fetch the actual PDF content for an order.
@@ -523,6 +538,14 @@ class GujaratHCService:
             "decision_date": None,
             "orders": [],
             "history": [],
+            "connected_matters": [],
+            "application_appeal_matters": [],
+            "ia_details": [],
+            "original_json": {
+                "documents": [],
+                "objections": [],
+                "ia_details": [],
+            },
             "raw_data": data  # Keep raw data for debugging/completeness
         }
 
@@ -571,17 +594,122 @@ class GujaratHCService:
                 elif l_type == '2':
                     result['res_advocates'].append(adv_name)
 
-        # 10. Court Proceedings (History)
-        if len(data) > 10 and 'linkedmatterscp' in data[10]:
-            for item in data[10]['linkedmatterscp']:
-                entry = {
-                    "business_date": self._parse_date(item.get('PROCEEDINGDATElmcp')),
-                    "hearing_date": self._parse_date(item.get('PROCEEDINGDATElmcp')), # Assuming same
-                    "judge": item.get('JUDGESlmcp'),
-                    "purpose": item.get('STAGENAMElmcp'),
-                    "result": item.get('ACTIONNAMElmcp')
+        # Court proceedings (hearing history).
+        linked_matters = self._get_section_records(data, "linkedmatterscp")
+        for item in linked_matters:
+            result["history"].append(
+                {
+                    "business_date": self._parse_date(item.get("PROCEEDINGDATElmcp")),
+                    "hearing_date": self._parse_date(item.get("PROCEEDINGDATElmcp")),
+                    "judge": item.get("JUDGESlmcp"),
+                    "purpose": item.get("STAGENAMElmcp"),
+                    "result": item.get("ACTIONNAMElmcp"),
                 }
-                result['history'].append(entry)
+            )
+
+        # Connected matters.
+        for item in self._get_section_records(data, "linkedmatters"):
+            result["connected_matters"].append(
+                {
+                    "case_no": item.get("casedescriptionlm"),
+                    "cin_no": item.get("cinolm"),
+                    "status": item.get("statusnamelm"),
+                    "disposal_date": self._parse_date(item.get("disposaldatelm")),
+                    "judge": item.get("JUDGESlm"),
+                    "action": item.get("actionname"),
+                }
+            )
+
+        # Application / Appeal matters.
+        for item in self._get_section_records(data, "lpamatters"):
+            result["application_appeal_matters"].append(
+                {
+                    "case_no": item.get("casedescriptionlm"),
+                    "cin_no": item.get("cinolm"),
+                    "status": item.get("statusnamelm"),
+                    "judge": item.get("JUDGESlm"),
+                    "disposal_date": self._parse_date(item.get("disposaldatelm")),
+                    "action": item.get("actionname"),
+                }
+            )
+
+        # IA Details (summary from main case API response).
+        for item in self._get_section_records(data, "applicationmatters"):
+            ia_number = (
+                item.get("aino")
+                or item.get("ia_no")
+                or item.get("ia_number")
+                or item.get("IANO")
+                or item.get("iaNo")
+            )
+            description = (
+                item.get("descriptionlm")
+                or item.get("description")
+                or item.get("ia_description")
+                or item.get("DESC")
+            )
+            status = (
+                item.get("statusnamelm")
+                or item.get("status")
+                or item.get("STATUS")
+            )
+            filing_date = self._parse_date(
+                item.get("filingdatelm")
+                or item.get("filing_date")
+                or item.get("iafilingdate")
+                or item.get("iadate")
+            )
+            next_date = self._parse_date(
+                item.get("nextdatelm")
+                or item.get("next_date")
+                or item.get("nexthearingdate")
+            )
+            disposal_date = self._parse_date(
+                item.get("disposaldatelm")
+                or item.get("disposal_date")
+            )
+            party = (
+                item.get("partyname")
+                or item.get("litigantname")
+                or item.get("party")
+            )
+            cin_no = item.get("ccin") or item.get("cin_no")
+
+            if not any(
+                [ia_number, description, status, filing_date, next_date, disposal_date, party, cin_no]
+            ):
+                continue
+
+            result["ia_details"].append(
+                {
+                    "ia_no": ia_number,
+                    "ia_number": ia_number,
+                    "description": description,
+                    "party": party,
+                    "filing_date": filing_date,
+                    "next_date": next_date,
+                    "status": status,
+                    "disposal_date": disposal_date,
+                    "cin_no": cin_no,
+                }
+            )
+
+        result["original_json"]["ia_details"] = result["ia_details"]
+
+        # Tagged orders often represent linked tagging context.
+        for item in self._get_section_records(data, "taggedorder"):
+            result["connected_matters"].append(
+                {
+                    "source": "taggedorder",
+                    "main_case_no": item.get("MAINCASE"),
+                    "tagged_case_no": item.get("TAGCASE"),
+                    "main_cin_no": item.get("mccin"),
+                    "main_order_no": item.get("mno"),
+                    "main_order_date": self._parse_date(item.get("mdate")),
+                    "tagged_order_no": item.get("tno"),
+                    "tagged_order_date": self._parse_date(item.get("tdate")),
+                }
+            )
 
         # 11. Order History
         if len(data) > 11 and 'orderhistory' in data[11]:
