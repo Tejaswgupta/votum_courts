@@ -21,6 +21,9 @@ from .gujarat_hc import get_gujarat_case_details
 from .gujarat_hc import \
     persist_orders_to_storage as gujarat_persist_orders_to_storage
 from .hc_services import hc_get_benches, hc_get_case_types, hc_get_states
+from .NCLAT import (nclat_get_details, nclat_search_by_case_no,
+                    nclat_search_by_free_text)
+from .NCLAT import persist_orders_to_storage as nclat_persist_orders_to_storage
 from .NCLT import (nclt_get_details, nclt_search_by_advocate_name,
                    nclt_search_by_case_number, nclt_search_by_filing_number,
                    nclt_search_by_party_name)
@@ -407,6 +410,11 @@ async def store_orders(
     court_key = (court_type or "").strip().upper()
     if court_key == "NCLT":
         stored_orders = await nclt_persist_orders_to_storage(
+            orders,
+            case_id=case_id,
+        )
+    elif court_key == "NCLAT":
+        stored_orders = await nclat_persist_orders_to_storage(
             orders,
             case_id=case_id,
         )
