@@ -1,5 +1,6 @@
 import io
 from typing import List, Dict, Any, Optional
+from xml.sax.saxutils import escape
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet
@@ -92,6 +93,168 @@ def generate_cause_list_pdf(
     t.setStyle(table_style)
     elements.append(t)
     
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def generate_daily_matters_pdf_1(
+    matters: List[Dict[str, Any]],
+    title: str,
+    subtitle: Optional[str] = None,
+) -> bytes:
+    """
+    PDF-1 (daily): matters listed tomorrow across courts.
+    Columns:
+      1) Serial No
+      2) Registration No
+      3) Court Name
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=30,
+        bottomMargin=30,
+    )
+
+    styles = getSampleStyleSheet()
+    elements: list = []
+
+    elements.append(Paragraph(title, styles["Title"]))
+    if subtitle:
+        elements.append(Paragraph(subtitle, styles["Heading2"]))
+    elements.append(Spacer(1, 20))
+
+    headers = ["S.No", "Registration No", "Court Name"]
+    data = [headers]
+
+    for idx, m in enumerate(matters, start=1):
+        data.append(
+            [
+                str(m.get("sno", idx)),
+                m.get("registration_no", "-"),
+                m.get("court_name", "-"),
+            ]
+        )
+
+    table_style = TableStyle(
+        [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+            ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
+            ("GRID", (0, 0), (-1, -1), 1, colors.black),
+            ("ALIGN", (1, 1), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("WORDWRAP", (0, 0), (-1, -1), True),
+        ]
+    )
+
+    # Landscape A4 usable width ~780. Keep "Court Name" wide.
+    col_widths = [60, 220, 500]
+    t = Table(data, colWidths=col_widths)
+    t.setStyle(table_style)
+    elements.append(t)
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def generate_daily_matters_pdf_2(
+    matters: List[Dict[str, Any]],
+    title: str,
+    subtitle: Optional[str] = None,
+) -> bytes:
+    """
+    PDF-2 (daily): same serial/registration order as PDF-1, plus next listing date + order links.
+    Columns:
+      1) Serial No
+      2) Registration No
+      3) Next Listing Date
+      4) Links to Orders Passed
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=30,
+        bottomMargin=30,
+    )
+
+    styles = getSampleStyleSheet()
+    elements: list = []
+
+    elements.append(Paragraph(title, styles["Title"]))
+    if subtitle:
+        elements.append(Paragraph(subtitle, styles["Heading2"]))
+    elements.append(Spacer(1, 20))
+
+    headers = ["S.No", "Registration No", "Next Listing Date", "Orders"]
+    data: list = [headers]
+
+    link_style = styles["BodyText"]
+
+    for idx, m in enumerate(matters, start=1):
+        orders = m.get("orders") or []
+        if isinstance(orders, str):
+            orders_html = escape(orders)
+        else:
+            parts: list[str] = []
+            for jdx, order in enumerate(orders, start=1):
+                if not isinstance(order, dict):
+                    continue
+                url = order.get("url") or order.get("document_url") or order.get("link")
+                if not url:
+                    continue
+                label = (
+                    order.get("label")
+                    or order.get("date")
+                    or f"Order {jdx}"
+                )
+                parts.append(
+                    f'<link href="{escape(str(url))}">{escape(str(label))}</link>'
+                )
+            orders_html = "<br/>".join(parts) if parts else "-"
+
+        data.append(
+            [
+                str(m.get("sno", idx)),
+                m.get("registration_no", "-"),
+                m.get("next_listing_date", "-"),
+                Paragraph(orders_html, link_style),
+            ]
+        )
+
+    table_style = TableStyle(
+        [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+            ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
+            ("GRID", (0, 0), (-1, -1), 1, colors.black),
+            ("ALIGN", (1, 1), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("WORDWRAP", (0, 0), (-1, -1), True),
+        ]
+    )
+
+    col_widths = [60, 210, 120, 390]
+    t = Table(data, colWidths=col_widths)
+    t.setStyle(table_style)
+    elements.append(t)
+
     doc.build(elements)
     buffer.seek(0)
     return buffer.read()
