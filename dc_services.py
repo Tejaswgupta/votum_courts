@@ -383,7 +383,6 @@ class EcourtsWebScraper:
                     'pet_name': case.get('pet_name'),
                     'res_name': case.get('res_name'),
                     'status': '', # Not available in summary
-                    'next_hearing_date': '', # Not available in summary
                     'details_params': case.get('details_params')
                 }
                 standard_cases.append(std_case)
@@ -670,6 +669,8 @@ class EcourtsWebScraper:
             'registration_no': None,
             'registration_date': None,
             'first_hearing_date': None,
+            # Compatibility with the rest of the app: "next listing date" is the next hearing/listing date.
+            'next_listing_date': None,
             'decision_date': None,
             'status': None,
             'nature_of_disposal': None,
@@ -678,6 +679,7 @@ class EcourtsWebScraper:
             'res_name': None,
             'acts': [],
             'history': [],
+            'ia_details': [],
             'orders': []
         }
         
@@ -714,6 +716,13 @@ class EcourtsWebScraper:
         cs_table = soup.find('table', class_='case_status_table')
         if cs_table:
             details['first_hearing_date'] = get_table_value(cs_table, 'First Hearing Date')
+            next_hearing = (
+                get_table_value(cs_table, 'Next Hearing Date')
+                or get_table_value(cs_table, 'Next Hearing')
+                or get_table_value(cs_table, 'Next Date')
+            )
+            normalized_next = _normalize_order_date(next_hearing) or next_hearing
+            details['next_listing_date'] = normalized_next
             details['decision_date'] = get_table_value(cs_table, 'Decision Date')
             details['status'] = get_table_value(cs_table, 'Case Status')
             details['nature_of_disposal'] = get_table_value(cs_table, 'Nature of Disposal')
@@ -755,6 +764,22 @@ class EcourtsWebScraper:
                             'business_date': cols[1].get_text(strip=True),
                             'hearing_date': cols[2].get_text(strip=True),
                             'purpose': cols[3].get_text(strip=True)
+                        })
+
+        # IA Details
+        ia_table = soup.find('table', class_='ia_table') or soup.find('table', class_='IAheading')
+        if ia_table:
+            rows = ia_table.find_all('tr')
+            if len(rows) > 1:
+                for row in rows[1:]:
+                    cols = row.find_all('td')
+                    if len(cols) >= 5:
+                        details['ia_details'].append({
+                            'ia_number': cols[0].get_text(separator=' ', strip=True),
+                            'party': cols[1].get_text(separator=' ', strip=True),
+                            'filing_date': _normalize_order_date(cols[2].get_text(strip=True)) or cols[2].get_text(strip=True),
+                            'next_date': cols[3].get_text(separator=' ', strip=True),
+                            'status': cols[4].get_text(strip=True)
                         })
 
         # Orders
@@ -971,34 +996,37 @@ async def persist_orders_to_storage(
     )
 
 if __name__ == "__main__":
-    import argparse
-    
     logging.basicConfig(level=logging.INFO)
-    
-    parser = argparse.ArgumentParser(description="Search eCourts cases by Case Number")
-    parser.add_argument("--state", required=True, help="State Code")
-    parser.add_argument("--district", required=True, help="District Code")
-    parser.add_argument("--complex", required=True, help="Court Complex Code (full string with @)")
-    parser.add_argument("--casetype", required=True, help="Case Type Code")
-    parser.add_argument("--caseno", required=True, help="Case Number")
-    parser.add_argument("--year", required=True, help="Registration Year")
-    parser.add_argument("--est", default="", help="Establishment Code (if applicable)")
-    
-    args = parser.parse_args()
-    
+
+    # Smoke-test for District Court details parsing (incl. next hearing/listing date).
+    # Example from: Bhadra Laldarwaja, Ahmedabad: C.S. CCC 377 OF 2025
+    params = {
+        "case_no": "200600003772025",
+        "cino": "GJAH020070222025",
+        "court_code": "21",
+        "hideparty": "",
+        "search_flag": "CScaseNumber",
+        "state_code": "17",
+        "dist_code": "13",
+        "court_complex_code": "1170040",
+        "search_by": "CScaseNumber",
+    }
+
     scraper = EcourtsWebScraper()
-    print(f"Searching for Case {args.caseno}/{args.year}...")
-    
-    # Initialize session first
-    if scraper.initialize_session():
-        result = scraper.search_case(
-            args.state, 
-            args.district, 
-            args.complex, 
-            args.casetype, 
-            args.caseno, 
-            args.year
+    if not scraper.initialize_session():
+        raise SystemExit("Failed to initialize eCourts web session")
+
+    details = scraper.get_case_details(params)
+    print(
+        json.dumps(
+            {
+                "cino": details.get("cino") if isinstance(details, dict) else None,
+                "case_no": details.get("case_no") if isinstance(details, dict) else None,
+                "registration_no": details.get("registration_no") if isinstance(details, dict) else None,
+                "next_listing_date": details.get("next_listing_date") if isinstance(details, dict) else None,
+                "status": details.get("status") if isinstance(details, dict) else None,
+                "ia_details": details.get("ia_details") if isinstance(details, dict) else None,
+            },
+            indent=2,
         )
-        print("Result:", result)
-    else:
-        print("Failed to initialize session.")
+    )
