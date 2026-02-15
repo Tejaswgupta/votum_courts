@@ -16,10 +16,9 @@ from .dc_services import \
 from .delhi_hc import get_delhi_case_details
 from .delhi_hc import \
     persist_orders_to_storage as delhi_persist_orders_to_storage
-from .ecourts import EcourtsService
 from .gujarat_hc import (get_gujarat_case_details,
-                        get_gujarat_case_details_by_cnr_no,
-                        get_gujarat_case_details_by_filing_no)
+                         get_gujarat_case_details_by_cnr_no,
+                         get_gujarat_case_details_by_filing_no)
 from .gujarat_hc import \
     persist_orders_to_storage as gujarat_persist_orders_to_storage
 from .hc_services import hc_get_benches, hc_get_case_types, hc_get_states
@@ -36,56 +35,6 @@ from .SCI import (sci_get_details, sci_search_by_aor_code,
 
 router = APIRouter(prefix="/ecourts", tags=["ecourts"])
 
-
-@router.get("/search_by_advocate_name/", summary="Search cases by advocate name")
-async def search_by_advocate_name(
-    court_type: str,
-    court_code: str,
-    checked_search_by_radio_value: int,
-    advocate_name: str,
-):
-    ecourts_service = EcourtsService(
-        court_type, "3f91159bc5ba1090:in.gov.ecourts.eCourtsServices"
-    )
-    return ecourts_service.search_by_advocate_name(
-        dist_code="",
-        state_code="",
-        checked_search_by_radio_value=str(checked_search_by_radio_value),
-        court_code=court_code,
-        advocate_name=advocate_name,
-    )
-
-
-
-@router.get("/search_ncdrc_search/")
-async def search_ncdrc_search(
-    state_code: str,
-    dist_code: str,
-    date_from: str,
-    date_to: str,
-    case_number: str | None = None,
-    complainant: str | None = None,
-    respondent: str | None = None,
-    advocate_complainant: str | None = None,
-    advocate_respondent: str | None = None,
-    case_type: str | None = None,
-    category: str | None = None,
-    andor: str = "and",
-):
-    return ncdrc_search(
-        state_code,
-        dist_code,
-        date_from,
-        date_to,
-        case_number,
-        complainant,
-        respondent,
-        advocate_complainant,
-        advocate_respondent,
-        case_type,
-        category,
-        andor,
-    )
 
 
 @router.get("/search_nclat_search_by_case_no/")
@@ -195,98 +144,7 @@ async def gujarat_hc_details_by_cnr_no(cnr_no: str):
     return get_gujarat_case_details_by_cnr_no(cnr_no)
 
 
-@router.get("/hc_case_types/", summary="Get case types for High Court bench")
-async def get_hc_case_types(state_code: str, court_code: str):
-    """
-    Get all available case types for a specific High Court bench by scraping.
-    
-    This endpoint scrapes the HC website to retrieve all case types available
-    for the specified bench (state_code and court_code combination).
-    
-    Args:
-        state_code: State code for the High Court (e.g., "7" for Gujarat)
-        court_code: Court code (bench identifier) for the specific bench
-    
-    Returns:
-        List of case types with their IDs and names:
-        [
-            {
-                "case_type_id": str,
-                "case_type_name": str
-            },
-            ...
-        ]
-    """
-    try:
-        case_types = hc_get_case_types(state_code=state_code, court_code=court_code)
-        return {
-            "state_code": state_code,
-            "court_code": court_code,
-            "case_types_count": len(case_types),
-            "case_types": case_types
-        }
-    except Exception as e:
-        return {
-            "error": str(e),
-            "state_code": state_code,
-            "court_code": court_code,
-            "case_types": []
-        }
 
-# ============================================================================
-# HC STATE LISTING
-# ============================================================================
-
-
-@router.get("/hc_states/", summary="List all available High Court states")
-async def get_hc_states():
-    """
-    Get all available High Court states with their state codes by scraping HC services.
-    Frontend should call this first to get the list of High Courts, then use the state_code
-    to fetch benches and case types.
-    """
-    try:
-        logger.info("Fetching High Court states")
-        states = hc_get_states()
-        logger.info(f"Retrieved {len(states)} High Court states")
-        return {
-            "states_count": len(states),
-            "states": states,
-        }
-    except Exception as e:
-        logger.error(f"Error fetching High Court states: {e}", exc_info=True)
-        return {
-            "error": str(e),
-            "states": [],
-        }
-
-
-# ============================================================================
-# HC BENCH LISTING
-# ============================================================================
-
-
-@router.get("/hc_benches/", summary="List benches for a High Court")
-async def get_hc_benches(state_code: str):
-    """
-    Get all benches (court_code + name) for a given High Court state_code by scraping HC services.
-    """
-    try:
-        logger.info(f"Fetching benches for state_code={state_code}")
-        benches = hc_get_benches(state_code=state_code)
-        logger.info(f"Retrieved {len(benches)} benches for state_code={state_code}")
-        return {
-            "state_code": state_code,
-            "benches_count": len(benches),
-            "benches": benches,
-        }
-    except Exception as e:
-        logger.error(f"Error fetching benches for state_code={state_code}: {e}", exc_info=True)
-        return {
-            "error": str(e),
-            "state_code": state_code,
-            "benches": [],
-        }
 
 @router.get("/hc/search_by_case_number/", summary="Search High Court cases by case number")
 async def hc_search_by_case_number(

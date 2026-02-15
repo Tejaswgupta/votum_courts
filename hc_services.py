@@ -1590,28 +1590,3 @@ if __name__ == '__main__':
     case_details = hc_search_by_cnr(
         "GJHC240325432025"  # Use the full CNR as cino
     )
-
-    # print(json.dumps(case_details))
-    # Convert response to the same format as before
-    # from ecourts import convert_hc_response_to_json
-    # formatted = convert_hc_response_to_json(case_details)
-    # print(formatted)
-
-    # sample = {
-    # "case_id": "46",
-    # "court_type": "High Court",
-    # "orders": [
-    #     {
-    #         "date": "2025-10-28",
-    #         "description": "View | Judge: NO COURT NO COURT AT PRESENT | Order No: 1",
-    #         "document_url": "https://hcservices.ecourts.gov.in/hcservices/cases/display_pdf.php?filename=A9S7c5LDIsB6RXaCf816x19QTArYkO0Y9xX66ij8MzW7NKzYoAsDgOLfrqapDLA7&caseno=ARB.P./1783/2025&cCode=1&cino=DLHC010825562025&state_code=26&court_code=1&&appFlag="
-    #     },
-    #     {
-    #         "date": "2025-11-19",
-    #         "description": "View | Judge: HON'BLE MR. JUSTICE JASMEET SINGH | Order No: 2",
-    #         "document_url": "https://hcservices.ecourts.gov.in/hcservices/cases/display_pdf.php?filename=A9S7c5LDIsB6RXaCf816x19QTArYkO0Y9xX66ij8MzWv6s8Hk5leYOGOSb%2B%2F8DgI&caseno=ARB.P./1783/2025&cCode=1&cino=DLHC010825562025&state_code=26&court_code=1&&appFlag="
-    #     }
-    # ]
-    # }
-    # res=persist_orders_to_storage(sample["orders"],sample['case_id'])  # Example function call to persist orders
-    # print(res)
