@@ -15,9 +15,6 @@ import ddddocr
 import fitz
 import httpx
 import requests
-from cron_jobs.task_email import send_smtp_email
-from cron_jobs.task_notifications import send_fcm_notification
-from cron_jobs.task_sms import send_sms_message
 from fastapi import APIRouter, Form, HTTPException
 from supabase_client import get_supabase_client
 from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
@@ -534,7 +531,7 @@ class GujaratHCService:
             "bench_name": None,
             "district": None,
             "first_hearing_date": None,
-            "next_hearing_date": None,
+            "next_listing_date": None,
             "decision_date": None,
             "orders": [],
             "history": [],
@@ -563,7 +560,7 @@ class GujaratHCService:
             result['bench_name'] = main.get('benchname')
             result['district'] = main.get('districtname')
             result['judges'] = main.get('judges')
-            result['next_hearing_date'] = self._parse_date(main.get('listingdate')) # Often listingdate is next date
+            result['next_listing_date'] = self._parse_date(main.get('listingdate')) # Often listingdate is next date
             result['decision_date'] = self._parse_date(main.get('disposaldate'))
             
             # Format registration number: TYPE/NO/YEAR
@@ -979,7 +976,7 @@ async def sync_cause_list(
 if __name__ == "__main__":
     # Test
     logging.basicConfig(level=logging.INFO)
-    print(json.dumps(get_gujarat_case_details("21", "4937", "2022")))
+    print(json.dumps(get_gujarat_case_details("SCA", "8680", "2025")))
     # Print cause list entries for a case
     res = find_case_entries("/Users/tejaswgupta/Downloads/votum/backend/ecourts/Complete_Causelist_9th_February_2026.pdf", "SCA/4937/2022")
     print(res[0].get("text") if res else "No entries found")

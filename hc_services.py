@@ -253,7 +253,7 @@ def table_to_list(soup):
         'res_name': item.get('Respondent', ''),
         'status': item.get('Status', ''),
         'last_hearing_date': parse_iso_date(item.get('Last Hearing Date', '')),
-        'next_hearing_date': parse_iso_date(item.get('Next Hearing Date', '')),
+        'next_listing_date': parse_iso_date(item.get('Next Hearing Date', '')),
         'bench': item.get('Bench', ''),
     } for item in data]
 
@@ -521,7 +521,7 @@ def hc_get_case_details(state_code, court_code, case_id):
                     "registration_date": parse_iso_date(json_response.get('registration_date')),
                     "status": json_response.get('status'),
                     "last_hearing_date": parse_iso_date(json_response.get('last_hearing_date')),
-                    "next_hearing_date": parse_iso_date(json_response.get('next_hearing_date')),
+                    "next_listing_date": parse_iso_date(json_response.get('next_listing_date')),
                     "bench": json_response.get('bench'),
                     "court_name": json_response.get('court_name'),
                     "orderurlpath": json_response.get('orderurlpath'),

@@ -61,6 +61,11 @@ def _normalize_order_date(date_str: Optional[str]) -> Optional[str]:
     if not value:
         return None
 
+    # eCourts sometimes uses ordinal day formats like "19th February 2026".
+    # Supabase date columns expect ISO `YYYY-MM-DD`, so normalize aggressively.
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", value, flags=re.I)
+
     formats = [
         "%d-%m-%Y",
         "%d/%m/%Y",
@@ -70,7 +75,13 @@ def _normalize_order_date(date_str: Optional[str]) -> Optional[str]:
         "%Y/%m/%d",
         "%d.%m.%Y",
         "%d %b %Y",
+        "%d %b, %Y",
         "%d %B %Y",
+        "%d %B, %Y",
+        "%b %d %Y",
+        "%b %d, %Y",
+        "%B %d %Y",
+        "%B %d, %Y",
     ]
     for fmt in formats:
         try:
@@ -703,9 +714,11 @@ class EcourtsWebScraper:
         if cd_table:
             details['case_type'] = get_table_value(cd_table, 'Case Type')
             details['filing_no'] = get_table_value(cd_table, 'Filing Number')
-            details['filing_date'] = get_table_value(cd_table, 'Filing Date')
+            filing_date = get_table_value(cd_table, 'Filing Date')
+            details['filing_date'] = _normalize_order_date(filing_date) or filing_date
             details['registration_no'] = get_table_value(cd_table, 'Registration Number')
-            details['registration_date'] = get_table_value(cd_table, 'Registration Date')
+            registration_date = get_table_value(cd_table, 'Registration Date')
+            details['registration_date'] = _normalize_order_date(registration_date) or registration_date
             
             # CNR Number is special
             cnr_span = cd_table.find('span', class_='text-danger')
@@ -715,7 +728,8 @@ class EcourtsWebScraper:
         # Case Status Table
         cs_table = soup.find('table', class_='case_status_table')
         if cs_table:
-            details['first_hearing_date'] = get_table_value(cs_table, 'First Hearing Date')
+            first_hearing_date = get_table_value(cs_table, 'First Hearing Date')
+            details['first_hearing_date'] = _normalize_order_date(first_hearing_date) or first_hearing_date
             next_hearing = (
                 get_table_value(cs_table, 'Next Hearing Date')
                 or get_table_value(cs_table, 'Next Hearing')
@@ -723,7 +737,8 @@ class EcourtsWebScraper:
             )
             normalized_next = _normalize_order_date(next_hearing) or next_hearing
             details['next_listing_date'] = normalized_next
-            details['decision_date'] = get_table_value(cs_table, 'Decision Date')
+            decision_date = get_table_value(cs_table, 'Decision Date')
+            details['decision_date'] = _normalize_order_date(decision_date) or decision_date
             details['status'] = get_table_value(cs_table, 'Case Status')
             details['nature_of_disposal'] = get_table_value(cs_table, 'Nature of Disposal')
             details['court_no_judge'] = get_table_value(cs_table, 'Court Number and Judge')
@@ -759,10 +774,12 @@ class EcourtsWebScraper:
                 for row in rows[1:]:
                     cols = row.find_all('td')
                     if len(cols) >= 4:
+                        business_date_raw = cols[1].get_text(strip=True)
+                        hearing_date_raw = cols[2].get_text(strip=True)
                         details['history'].append({
                             'judge': cols[0].get_text(strip=True),
-                            'business_date': cols[1].get_text(strip=True),
-                            'hearing_date': cols[2].get_text(strip=True),
+                            'business_date': _normalize_order_date(business_date_raw) or business_date_raw,
+                            'hearing_date': _normalize_order_date(hearing_date_raw) or hearing_date_raw,
                             'purpose': cols[3].get_text(strip=True)
                         })
 
