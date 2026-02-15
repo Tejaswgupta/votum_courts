@@ -549,8 +549,7 @@ def hc_get_case_details(state_code, court_code, case_id):
                 "case_type": None,
                 "pet_name": None,
                 "res_name": None,
-                "petitioner_advocates": None,
-                "respondent_advocates": None,
+                "advocates": None,
                 "judges": None,
                 "bench_name": None,
                 "court_name": None,
@@ -690,8 +689,7 @@ def parse_case_history(html_content):
         'case_type': None,
         'pet_name': None,
         'res_name': None,
-        'petitioner_advocates': None,
-        'respondent_advocates': None,
+        'advocates': None,
         'judges': None,
         'bench_name': None,
         'court_name': None,
@@ -859,10 +857,13 @@ def parse_case_history(html_content):
         if petitioner_parent:
             petitioner_all_name = petitioner_parent.get_text(separator=' ', strip=True)
             pet_name, pet_advs = _split_party_and_advocates(petitioner_all_name)
-            print('pet_name', pet_name)
-            print('pet_adv', pet_advs)
             result['pet_name'] = pet_name if pet_name else [petitioner_all_name.strip()]
-            result['petitioner_advocates'] = pet_advs
+            existing = result.get("advocates") or ""
+            fragment = petitioner_all_name.strip()
+            result["advocates"] = (
+                "\n".join([x for x in [existing.strip(), f"Petitioner: {fragment}"] if x]).strip()
+                or None
+            )
 
     respondent_div = soup.find(string=lambda x: x and 'Respondent and Advocate' in x)
     if respondent_div:
@@ -870,10 +871,13 @@ def parse_case_history(html_content):
         if respondent_parent:
             respondent_all_name = respondent_parent.get_text(separator=' ', strip=True)
             res_name, res_advs = _split_party_and_advocates(respondent_all_name)
-            print('res_name', res_name)
-            print('res_adv', res_advs)
             result['res_name'] = res_name if res_name else [respondent_all_name.strip()]
-            result['respondent_advocates'] = res_advs
+            existing = result.get("advocates") or ""
+            fragment = respondent_all_name.strip()
+            result["advocates"] = (
+                "\n".join([x for x in [existing.strip(), f"Respondent: {fragment}"] if x]).strip()
+                or None
+            )
 
     # Extract category details as case_type
     category_table = soup.find('table', id='subject_table')

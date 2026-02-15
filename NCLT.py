@@ -606,8 +606,25 @@ def nclt_get_details(bench, filing_no):
             "case_type": final_status.get('case_type'),
             "pet_name": pet_names,
             "res_name": res_names,
-            "petitioner_advocates": list(set(pet_advs)),
-            "respondent_advocates": list(set(res_advs)),
+            "advocates": "\n".join(
+                [
+                    x
+                    for x in [
+                        (
+                            f"Petitioner: {', '.join(sorted({a for a in pet_advs if a}))}"
+                            if pet_advs
+                            else None
+                        ),
+                        (
+                            f"Respondent: {', '.join(sorted({a for a in res_advs if a}))}"
+                            if res_advs
+                            else None
+                        ),
+                    ]
+                    if x
+                ]
+            ).strip()
+            or None,
             "judges": None,
             "bench_name": bench,
             "court_name": final_status.get('bench_nature_descr'),

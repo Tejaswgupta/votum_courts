@@ -396,8 +396,12 @@ def convert_response_json(type, response_json):
     concise_json["case_type"] = history["type_name"]
     concise_json["pet_name"] = history["pet_name"]
     concise_json["res_name"] = history["res_name"]
-    concise_json["petitioner_advocates"] = history["pet_adv"]
-    concise_json["respondent_advocates"] = history["res_adv"]
+    advocates_lines = []
+    if history.get("pet_adv"):
+        advocates_lines.append(f"Petitioner: {history['pet_adv']}")
+    if history.get("res_adv"):
+        advocates_lines.append(f"Respondent: {history['res_adv']}")
+    concise_json["advocates"] = "\n".join(advocates_lines).strip() or None
 
     if type == "HC":
         concise_json["judges"] = history["court_judge"]
@@ -583,8 +587,7 @@ def convert_hc_response_to_json(hc_response):
         'case_type': hc_response.get('case_type'),
         'pet_name': hc_response.get('pet_name'),
         'res_name': hc_response.get('res_name'),
-        'petitioner_advocates': hc_response.get('petitioner_advocates'),
-        'respondent_advocates': hc_response.get('respondent_advocates'),
+        'advocates': hc_response.get('advocates'),
         'judges': hc_response.get('judges'),
         'bench_name': hc_response.get('bench_name'),
         'court_name': hc_response.get('court_name'),

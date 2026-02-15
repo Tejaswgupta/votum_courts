@@ -309,8 +309,7 @@ class BombayHCService:
             "case_year": None,
             "pet_name": [],
             "res_name": [],
-            "pet_advocates": [],
-            "res_advocates": [],
+            "advocates": None,
             "judges": None, # Not always available in main details
             "court_name": "Bombay High Court",
             "bench_name": None,
@@ -351,14 +350,16 @@ class BombayHCService:
         if res_text:
             result['res_name'] = [res_text]
             
-        # Advocates
+        # Advocates (store raw text; no name extraction)
         pet_adv = self._extract_label_value(soup, "Petitioner's Advocate")
-        if pet_adv:
-            result['pet_advocates'] = [pet_adv]
-            
         res_adv = self._extract_label_value(soup, "Respondent's Advocate")
+        lines = []
+        if pet_adv:
+            lines.append(f"Petitioner: {pet_adv.strip()}")
+            
         if res_adv:
-            result['res_advocates'] = [res_adv]
+            lines.append(f"Respondent: {res_adv.strip()}")
+        result["advocates"] = "\n".join([x for x in lines if x]).strip() or None
 
         # Case No parsing (from Filing No if Reg No is missing?)
         # "WP - 2 - 2023" or "WP 2 2023"
@@ -371,9 +372,8 @@ class BombayHCService:
                 result['case_year'] = parts[2].strip()
                 result['registration_no'] = f"{result['case_type']}/{result['case_no']}/{result['case_year']}"
 
-        # Clean lists
-        result['pet_advocates'] = [x for x in [self._clean_text(a) for a in result['pet_advocates']] if x]
-        result['res_advocates'] = [x for x in [self._clean_text(a) for a in result['res_advocates']] if x]
+        # Clean text fields
+        result["advocates"] = self._clean_text(result.get("advocates"))
 
 
         # Orders

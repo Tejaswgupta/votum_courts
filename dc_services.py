@@ -688,6 +688,7 @@ class EcourtsWebScraper:
             'court_no_judge': None,
             'pet_name': None,
             'res_name': None,
+            'advocates': None,
             'acts': [],
             'history': [],
             'ia_details': [],
@@ -751,6 +752,18 @@ class EcourtsWebScraper:
         res_table = soup.find('table', class_='Respondent_Advocate_table')
         if res_table:
             details['res_name'] = [res_table.get_text(separator=' ', strip=True)]
+
+        # Advocates (store raw text from these tables; do not extract/normalize names)
+        advocates_lines = []
+        if pet_table:
+            pet_raw = pet_table.get_text(separator='\n', strip=True)
+            if pet_raw:
+                advocates_lines.append(f"Petitioner:\n{pet_raw}")
+        if res_table:
+            res_raw = res_table.get_text(separator='\n', strip=True)
+            if res_raw:
+                advocates_lines.append(f"Respondent:\n{res_raw}")
+        details['advocates'] = "\n\n".join(advocates_lines).strip() or None
 
         # Acts
         act_table = soup.find('table', id='act_table') or soup.find('table', class_='acts_table')

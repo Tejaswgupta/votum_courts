@@ -673,19 +673,15 @@ def sci_get_details(diary_no, diary_year):
         petitioner_advocates_raw = _extract_td_text(
             soup, "Petitioner Advocate(s)", separator="\n"
         )
-        petitioner_advocates = (
-            [adv.strip() for adv in petitioner_advocates_raw.splitlines() if adv.strip()]
-            if petitioner_advocates_raw
-            else None
-        )
         respondent_advocates_raw = _extract_td_text(
             soup, "Respondent Advocate(s)", separator="\n"
         )
-        respondent_advocates = (
-            [adv.strip() for adv in respondent_advocates_raw.splitlines() if adv.strip()]
-            if respondent_advocates_raw
-            else None
-        )
+        advocates_lines: list[str] = []
+        if petitioner_advocates_raw and petitioner_advocates_raw.strip():
+            advocates_lines.append(f"Petitioner:\n{petitioner_advocates_raw.strip()}")
+        if respondent_advocates_raw and respondent_advocates_raw.strip():
+            advocates_lines.append(f"Respondent:\n{respondent_advocates_raw.strip()}")
+        advocates_raw = "\n\n".join(advocates_lines).strip() or None
 
         cin_no = _extract_td_text(soup, "CNR Number")
 
@@ -731,10 +727,9 @@ def sci_get_details(diary_no, diary_year):
             "disposal_nature": pending_or_disposed,
             "purpose_next": status,
             "case_type": category,
-            "pet_name": ", ".join(petitioners) if petitioners else None,
-            "res_name": ", ".join(respondents) if respondents else None,
-            "petitioner_advocates": ", ".join(petitioner_advocates) if petitioner_advocates else None,
-            "respondent_advocates": ", ".join(respondent_advocates) if respondent_advocates else None,
+            "pet_name": petitioners or [],
+            "res_name": respondents or [],
+            "advocates": advocates_raw,
             "judges": ", ".join(judges) if judges else None,
             "bench_name": None,
             "court_name": None,

@@ -129,6 +129,7 @@ def _is_party_noise_line(text: str) -> bool:
 def _parse_single_cause_list_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     case_lines = entry.get("case_lines") or []
     party_lines = entry.get("party_lines") or []
+    advocate_lines = entry.get("advocate_lines") or []
     raw_lines = entry.get("raw_lines") or []
 
     case_numbers: List[str] = []
@@ -142,6 +143,8 @@ def _parse_single_cause_list_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
 
     petitioner: Optional[str] = None
     respondent: Optional[str] = None
+    petitioner_parts: List[str] = []
+    respondent_parts: List[str] = []
     vs_indexes = [idx for idx, line in enumerate(party_lines) if _is_vs_line(line)]
     if vs_indexes:
         first_vs = vs_indexes[0]
@@ -162,8 +165,13 @@ def _parse_single_cause_list_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
             if norm_line and norm_line in petitioner_norm_set:
                 break
             respondent_lines.append(line)
-        petitioner = " ".join(petitioner_lines).strip() or None
-        respondent = " ".join(respondent_lines).strip() or None
+        petitioner_parts = [x.strip() for x in petitioner_lines if x and x.strip()]
+        respondent_parts = [x.strip() for x in respondent_lines if x and x.strip()]
+        petitioner = " ".join(petitioner_parts).strip() or None
+        respondent = " ".join(respondent_parts).strip() or None
+    else:
+        # Fallback: keep party lines as a single list if we can't find a VS delimiter.
+        petitioner_parts = [x.strip() for x in party_lines if x and x.strip()]
 
     case_no = case_numbers[0] if case_numbers else None
     party_names = None
@@ -175,17 +183,25 @@ def _parse_single_cause_list_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         party_names = respondent
 
     text = "\n".join(raw_lines).strip()
+    advocates = "\n".join([x for x in advocate_lines if x]).strip() or None
     entry_hash_src = f"{entry.get('item_no')}|{entry.get('page_no')}|{text}"
     entry_hash = hashlib.sha256(entry_hash_src.encode("utf-8")).hexdigest()
+
+    # New regime:
+    # - parties: extracted into an array (petitioner parts + respondent parts when available)
+    # - advocates: store the raw advocates text (no name extraction)
+    parties = [x for x in (petitioner_parts + respondent_parts) if x]
 
     return {
         "item_no": entry.get("item_no"),
         "page_no": entry.get("page_no"),
         "case_no": case_no,
         "case_nos": case_numbers,
+        "parties": parties,
         "petitioner": petitioner,
         "respondent": respondent,
         "party_names": party_names,
+        "advocates": advocates,
         "text": text,
         "entry_hash": entry_hash,
     }
@@ -252,6 +268,8 @@ def parse_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
                             open_entry["case_lines"].append(txt)
                         elif 200 <= x < 345:
                             open_entry["party_lines"].append(txt)
+                        elif 345 <= x < 470:
+                            open_entry["advocate_lines"].append(txt)
                 continue
 
             first_start_y = starts[0]["y"]
@@ -266,6 +284,8 @@ def parse_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
                         open_entry["case_lines"].append(txt)
                     elif 200 <= x < 345:
                         open_entry["party_lines"].append(txt)
+                    elif 345 <= x < 470:
+                        open_entry["advocate_lines"].append(txt)
                 entries.append(_parse_single_cause_list_entry(open_entry))
                 open_entry = None
 
@@ -278,6 +298,7 @@ def parse_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
                     "raw_lines": [],
                     "case_lines": [],
                     "party_lines": [],
+                    "advocate_lines": [],
                 }
                 for line in lines:
                     if not (y_start <= line["y"] < y_end):
@@ -289,6 +310,8 @@ def parse_cause_list_pdf(pdf_path: str) -> List[Dict[str, Any]]:
                         segment["case_lines"].append(txt)
                     elif 200 <= x < 345:
                         segment["party_lines"].append(txt)
+                    elif 345 <= x < 470:
+                        segment["advocate_lines"].append(txt)
 
                 if idx + 1 < len(starts):
                     entries.append(_parse_single_cause_list_entry(segment))
@@ -524,8 +547,8 @@ class GujaratHCService:
             "case_year": None,
             "pet_name": [],
             "res_name": [],
-            "pet_advocates": [],
-            "res_advocates": [],
+            # New regime: advocates stored as raw text (single field), not extracted into arrays.
+            "advocates": None,
             "judges": None,
             "court_name": "Gujarat High Court",
             "bench_name": None,
@@ -546,9 +569,10 @@ class GujaratHCService:
             "raw_data": data  # Keep raw data for debugging/completeness
         }
 
-        # 4. Main Details
-        if len(data) > 4 and 'maindetails' in data[4]:
-            main = data[4]['maindetails'][0]
+        # Main Details (ordering can vary: use section lookup)
+        main_records = self._get_section_records(data, "maindetails")
+        if main_records:
+            main = main_records[0]
             result['cin_no'] = main.get('ccin')
             result['status'] = main.get('casestatus')
             result['registration_date'] = self._parse_date(main.get('registration_date'))
@@ -567,29 +591,34 @@ class GujaratHCService:
             if result['case_type'] and result['case_no'] and result['case_year']:
                 result['registration_no'] = f"{result['case_type']}/{result['case_no']}/{result['case_year']}"
 
-        # 0. Litigant (Petitioner)
-        if len(data) > 0 and 'litigant' in data[0]:
-            for item in data[0]['litigant']:
+        # Litigant (Petitioner)
+        for item in self._get_section_records(data, "litigant"):
                 name = item.get('litigantname')
                 if name:
                     result['pet_name'].append(name)
 
-        # 1. Respondent
-        if len(data) > 1 and 'respondant' in data[1]:
-            for item in data[1]['respondant']:
+        # Respondent
+        for item in self._get_section_records(data, "respondant"):
                 name = item.get('respondantname')
                 if name:
                     result['res_name'].append(name)
 
-        # 2. Advocate
-        if len(data) > 2 and 'advocate' in data[2]:
-            for item in data[2]['advocate']:
-                adv_name = item.get('advocatename')
-                l_type = item.get('litiganttypecode') # 1=Pet, 2=Res
-                if l_type == '1':
-                    result['pet_advocates'].append(adv_name)
-                elif l_type == '2':
-                    result['res_advocates'].append(adv_name)
+        # Advocate (store raw text; no name extraction/splitting)
+        advocate_records = self._get_section_records(data, "advocate")
+        if advocate_records:
+            lines: List[str] = []
+            for item in advocate_records:
+                adv_name = (item.get("advocatename") or "").strip()
+                l_type = (item.get("litiganttypecode") or "").strip()  # 1=Pet, 2=Res
+                if not adv_name:
+                    continue
+                if l_type == "1":
+                    lines.append(f"Petitioner: {adv_name}")
+                elif l_type == "2":
+                    lines.append(f"Respondent: {adv_name}")
+                else:
+                    lines.append(adv_name)
+            result["advocates"] = "\n".join(lines).strip() or None
 
         # Court proceedings (hearing history).
         linked_matters = self._get_section_records(data, "linkedmatterscp")
