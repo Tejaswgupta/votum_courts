@@ -746,35 +746,68 @@ class GujaratHCService:
         Fetch case details by Case Type (Name), Number, and Year.
         e.g. fetch_case_details("SCA", "7966", "2025")
         """
-        self._refresh_session()
-        
-        # 1. Get Case Code
-        types = self.get_case_types()
-        case_code = types.get(case_type_name.upper()) or types.get(case_type_name)
+        case_code = self._get_case_code(case_type_name)
         if not case_code:
             logger.error(f"Case type '{case_type_name}' not found.")
-            # Fallback: maybe the user passed the code directly?
-            if case_type_name.isdigit():
-                 case_code = case_type_name
-            else:
-                 return None
+            return None
 
-        # 2. Solve Captcha
+        # Format: R#<case_code>#<case_no>#<case_year>
+        case_code = str(case_code).zfill(3)
+        genccin = f"R#{case_code}#{case_no}#{case_year}"
+        
+        return self._fetch_by_genccin(genccin)
+
+    @retry(
+        retry=retry_if_exception_type((requests.RequestException, ValueError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
+    def fetch_case_by_filing_no(self, case_type_name: str, filing_no: str, filing_year: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch case details by Filing Number.
+        """
+        case_code = self._get_case_code(case_type_name)
+        if not case_code:
+            logger.error(f"Case type '{case_type_name}' not found.")
+            return None
+
+        # Format: F#<case_code>#<filing_no>#<filing_year>
+        case_code = str(case_code).zfill(3)
+        genccin = f"F#{case_code}#{filing_no}#{filing_year}"
+        
+        return self._fetch_by_genccin(genccin)
+
+    @retry(
+        retry=retry_if_exception_type((requests.RequestException, ValueError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
+    def fetch_case_by_cnr_no(self, cnr_no: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch case details by CNR Number.
+        """
+        # Format: C#<cnr_no>
+        genccin = f"C#{cnr_no}"
+        
+        return self._fetch_by_genccin(genccin)
+
+    def _get_case_code(self, case_type_name: str) -> Optional[str]:
+        types = self.get_case_types()
+        case_code = types.get(case_type_name.upper()) or types.get(case_type_name)
+        if not case_code and case_type_name.isdigit():
+            case_code = case_type_name
+        return case_code
+
+    def _fetch_by_genccin(self, genccin: str) -> Optional[Dict[str, Any]]:
+        """Fetch data from the server using the constructed GENCCIN."""
+        self._refresh_session()
+        
+        # Solve Captcha
         captcha = self.solve_captcha()
         if not captcha:
             raise ValueError("Failed to solve CAPTCHA")
 
-        # 3. Construct GENCCIN
-        # Format: R#<case_code>#<case_no>#<case_year>
-        # Ensure 3 digit case code (padded), 5 digit case no (padded) - handled by server usually but JS does padding
-        # JS: while (casecode.length < 3) casecode = "0" + casecode;
-        # JS: while (casenumber.length < 5) casenumber = "0" + casenumber;
-        
-        case_code = str(case_code).zfill(3)
-        
-        genccin = f"R#{case_code}#{case_no}#{case_year}"
-        
-        # 4. Fetch Data
+        # Fetch Data
         data = {
             'ccin': genccin,
             'servicecode': '1',
@@ -798,9 +831,10 @@ class GujaratHCService:
              
         if 'data' in json_resp:
             parsed = self._parse_details(json_resp['data'])
-            if parsed and not parsed.get("registration_no"):
-                logger.warning("Missing registration_no for case %s/%s/%s; retrying.", case_type_name, case_no, case_year)
-                raise ValueError("Missing registration_no")
+            # Sometimes the server returns success but missing key fields if it didn't find the case properly
+            if parsed and not (parsed.get("registration_no") or parsed.get("filing_no")):
+                 logger.warning("Missing registration/filing info for CCIN %s; retrying.", genccin)
+                 raise ValueError("Incomplete case details in response")
             return parsed
         
         return None
@@ -810,6 +844,12 @@ _service = GujaratHCService()
 
 def get_gujarat_case_details(case_type: str, case_no: str, case_year: str):
     return _service.fetch_case_details(case_type, case_no, case_year)
+
+def get_gujarat_case_details_by_filing_no(case_type: str, filing_no: str, filing_year: str):
+    return _service.fetch_case_by_filing_no(case_type, filing_no, filing_year)
+
+def get_gujarat_case_details_by_cnr_no(cnr_no: str):
+    return _service.fetch_case_by_cnr_no(cnr_no)
 
 def _fetch_order_document(url: str, referer: str | None = None) -> requests.Response:
     """

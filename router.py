@@ -17,7 +17,9 @@ from .delhi_hc import get_delhi_case_details
 from .delhi_hc import \
     persist_orders_to_storage as delhi_persist_orders_to_storage
 from .ecourts import EcourtsService
-from .gujarat_hc import get_gujarat_case_details
+from .gujarat_hc import (get_gujarat_case_details,
+                        get_gujarat_case_details_by_cnr_no,
+                        get_gujarat_case_details_by_filing_no)
 from .gujarat_hc import \
     persist_orders_to_storage as gujarat_persist_orders_to_storage
 from .hc_services import hc_get_benches, hc_get_case_types, hc_get_states
@@ -183,6 +185,16 @@ async def gujarat_hc_details(case_type: str, case_no: str, case_year: str):
     return get_gujarat_case_details(case_type, case_no, case_year)
 
 
+@router.get("/gujarat_hc_details_by_filing_no/", summary="Fetch Gujarat High Court case details by filing number")
+async def gujarat_hc_details_by_filing_no(case_type: str, filing_no: str, filing_year: str):
+    return get_gujarat_case_details_by_filing_no(case_type, filing_no, filing_year)
+
+
+@router.get("/gujarat_hc_details_by_cnr_no/", summary="Fetch Gujarat High Court case details by CNR number")
+async def gujarat_hc_details_by_cnr_no(cnr_no: str):
+    return get_gujarat_case_details_by_cnr_no(cnr_no)
+
+
 @router.get("/hc_case_types/", summary="Get case types for High Court bench")
 async def get_hc_case_types(state_code: str, court_code: str):
     """
@@ -316,6 +328,14 @@ async def hc_search_by_party_name(
 
 @router.get("/hc/search_by_cnr/", summary="Search High Court cases by CNR number")
 async def hc_search_by_cnr(cnr_number: str):
+    if cnr_number and cnr_number.startswith("GJHC"):
+        try:
+            res = get_gujarat_case_details_by_cnr_no(cnr_number)
+            if res:
+                return res
+        except Exception as e:
+            logger.warning(f"Direct Gujarat HC search failed for CNR {cnr_number}: {e}")
+            
     return hc_services.hc_search_by_cnr(cnr_number)
 
 
